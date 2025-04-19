@@ -39,6 +39,11 @@ const createSocket = async (state, saveCreds) => {
         keepAliveIntervalMs: 30_000,
         connectTimeoutMs: 120_000,
         defaultQueryTimeoutMs: 90_000,
+        syncFullHistory: false,
+        fireInitQueries: true,
+        shouldIgnoreJid: jid => false,
+        linkPreviewImageThumbnailWidth: 192,
+        transactionOpts: { maxCommitRetries: 10, delayBetweenTriesMs: 3000 }
     });
 };
 
@@ -49,7 +54,6 @@ const cleanupConnection = (sessionId) => {
         clearTimeout(timer);
         connectionManager.delete(sessionId);
         
-        // Clean up session files if they exist
         try {
             const sessionPath = path.join(sessionDir, sessionId);
             if (fs.existsSync(sessionPath)) {
@@ -68,7 +72,6 @@ app.post('/api/get-pairing-code', async (req, res) => {
 
     cleanupConnection(sessionId);
 
-    // Response tracker to prevent multiple responses
     let responded = false;
     const sendResponse = (status, data) => {
         if (!responded) {
@@ -86,7 +89,7 @@ app.post('/api/get-pairing-code', async (req, res) => {
         const timer = setTimeout(() => {
             sendResponse(408, { error: 'Pairing timed out. Try again.' });
             cleanupConnection(sessionId);
-        }, 90000);
+        }, 120000); // Increased timeout to 120 seconds
 
         connectionManager.set(sessionId, { sock, timer });
 
@@ -94,7 +97,7 @@ app.post('/api/get-pairing-code', async (req, res) => {
 
         let code = null;
         let attempts = 0;
-        const maxAttempts = 3;
+        const maxAttempts = 5; // Increased max attempts
         
         while (attempts < maxAttempts && !code) {
             try {
@@ -102,10 +105,11 @@ app.post('/api/get-pairing-code', async (req, res) => {
                 if (code) break;
             } catch (err) {
                 attempts++;
+                console.error(`Pairing attempt ${attempts} failed:`, err.message);
                 if (attempts >= maxAttempts) {
-                    throw new Error('Failed to generate pairing code after multiple attempts.');
+                    throw new Error('Failed to generate pairing code after multiple attempts. Please try again later.');
                 }
-                await delay(2000);
+                await delay(3000); // Increased delay between attempts
             }
         }
 
@@ -114,35 +118,51 @@ app.post('/api/get-pairing-code', async (req, res) => {
         const formattedCode = code.match(/.{1,4}/g)?.join('-') || code;
 
         sock.ev.on('connection.update', async (update) => {
-            const { connection, lastDisconnect } = update;
+            const { connection, lastDisconnect, isNewLogin } = update;
 
             if (connection === 'open') {
                 clearTimeout(timer);
-                const sessionString = Buffer.from(JSON.stringify(sock.authState.creds)).toString('base64');
                 try {
-                    await sock.sendMessage(userJid, {
-                        text: `✅ WhatsApp connected!\nSession ID: ${sessionId}\nSession String:\n${sessionString}`
+                    // Wait for initial sync to complete
+                    await delay(2000);
+                    
+                    const sessionString = Buffer.from(JSON.stringify(sock.authState.creds)).toString('base64');
+                    try {
+                        await sock.sendMessage(userJid, {
+                            text: `✅ WhatsApp connected!\nSession ID: ${sessionId}\nSession String:\n${sessionString}`
+                        });
+                    } catch (err) {
+                        console.error('Error sending connection message:', err);
+                    }
+                    
+                    sendResponse(200, {
+                        sessionId,
+                        pairingCode: formattedCode,
+                        message: 'Successfully connected and paired.',
+                        isNewLogin
                     });
+                    
+                    await delay(1000);
+                    sock.end();
+                    connectionManager.delete(sessionId);
                 } catch (err) {
-                    console.error('Error sending connection message:', err);
+                    console.error('Connection open handler error:', err);
+                    sendResponse(500, { error: 'Connection established but sync failed.' });
                 }
-                sendResponse(200, {
-                    sessionId,
-                    pairingCode: formattedCode,
-                    message: 'Successfully connected and paired.'
-                });
-                await delay(1000);
-                sock.end();
-                connectionManager.delete(sessionId);
             }
 
             if (connection === 'close') {
                 clearTimeout(timer);
                 const reason = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.reason;
+                
                 if (reason === DisconnectReason.connectionLost) {
                     sendResponse(500, { error: 'Connection lost. Please try again.' });
                 } else if (reason === DisconnectReason.restartRequired) {
                     sendResponse(500, { error: 'Session expired. Please generate a new pairing code.' });
+                } else if (reason === DisconnectReason.badSession) {
+                    sendResponse(500, { error: 'Invalid session. Please start a new session.' });
+                } else if (reason === DisconnectReason.invalidSession) {
+                    sendResponse(500, { error: 'Session invalid. Please generate a new code.' });
                 } else {
                     sendResponse(500, { error: 'Disconnected during pairing. Try again.' });
                 }
@@ -154,7 +174,7 @@ app.post('/api/get-pairing-code', async (req, res) => {
         sendResponse(200, {
             sessionId,
             pairingCode: formattedCode,
-            message: 'Pairing code generated. Scan within 90 seconds.'
+            message: 'Pairing code generated. Enter this code in your WhatsApp linked devices section within 2 minutes.'
         });
 
     } catch (err) {
@@ -164,17 +184,23 @@ app.post('/api/get-pairing-code', async (req, res) => {
         let userMessage = err.message;
         
         if (errorMessage.includes('link')) {
-            userMessage = 'Device linking failed. Try again or use QR code.';
+            userMessage = 'Device linking failed. Please try again or use QR code method.';
         } else if (errorMessage.includes('timed out')) {
             userMessage = 'Request timed out. Please try again.';
         } else if (errorMessage.includes('attempt')) {
-            userMessage = 'Failed after multiple attempts. Please try again.';
+            userMessage = 'Failed after multiple attempts. Please wait a few minutes and try again.';
+        } else if (errorMessage.includes('session')) {
+            userMessage = 'Session error. Please start a new pairing process.';
         }
         
-        sendResponse(500, { error: userMessage });
+        sendResponse(500, { 
+            error: userMessage,
+            suggestion: 'Try using the QR code method if pairing continues to fail.'
+        });
     }
 });
 
+// QR code endpoint remains the same as in previous version
 app.post('/api/get-qr', async (req, res) => {
     const { sessionId, phoneNumber } = req.body;
 
