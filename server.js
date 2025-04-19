@@ -1,340 +1,224 @@
+const express = require('express');
 const fs = require('fs');
 const path = require('path');
-const express = require('express');
-const qrcode = require('qrcode');
-const { Boom } = require('@hapi/boom');
-const {
-    default: makeWASocket,
-    useMultiFileAuthState,
+const archiver = require('archiver');
+const Pino = require('pino');
+const { 
+    ToxxicTechConnect, 
+    useMultiFileAuthState, 
     DisconnectReason,
-    Browsers,
-    delay
+    makeInMemoryStore,
+    BufferJSON
 } = require('@whiskeysockets/baileys');
-
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+// Middleware
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static('public'));
 
-const sessionDir = path.join(__dirname, 'sessions');
-if (!fs.existsSync(sessionDir)) fs.mkdirSync(sessionDir, { recursive: true });
+// Session storage
+const sessionsDir = path.join(__dirname, 'sessions');
+if (!fs.existsSync(sessionsDir)) {
+    fs.mkdirSync(sessionsDir, { recursive: true });
+}
 
-const connectionManager = new Map();
+// Logger
+const log = (message) => console.log(`[LEVI-MD] → ${message}`);
+const errorLog = (message) => console.error(`[LEVI-MD] → ❌ ${message}`);
 
-const validatePhoneNumber = (number) => {
-    const cleaned = number.replace(/[^\d]/g, '');
-    return cleaned.length >= 10 && cleaned.length <= 15;
-};
+// Store active connections
+const activeConnections = new Map();
 
-const createSocket = async (state, saveCreds) => {
-    return makeWASocket({
-        auth: state,
-        browser: Browsers.macOS('Safari'),
+// Generate random session ID
+function generateSessionId() {
+    const prefix = 'levi';
+    const randomChars = () => Math.random().toString(36).substring(2, 10);
+    return `${prefix}${Math.floor(Math.random() * 1000000)}${randomChars()}`.toLowerCase();
+}
+
+// Create zip from session folder
+function createZip(sessionId, res) {
+    const sessionPath = path.join(sessionsDir, sessionId);
+    const zipPath = path.join(sessionsDir, `${sessionId}.zip`);
+    
+    const output = fs.createWriteStream(zipPath);
+    const archive = archiver('zip', { zlib: { level: 9 } });
+    
+    output.on('close', () => {
+        res.download(zipPath, `${sessionId}.zip`, (err) => {
+            if (err) errorLog(`Download error: ${err}`);
+            // Clean up after download
+            fs.unlinkSync(zipPath);
+        });
+    });
+    
+    archive.on('error', (err) => {
+        errorLog(`Archive error: ${err}`);
+        res.status(500).send('Error creating zip file');
+    });
+    
+    archive.pipe(output);
+    archive.directory(sessionPath, false);
+    archive.finalize();
+}
+
+// Initialize and manage WhatsApp connection
+async function createWhatsAppConnection(sessionId, number) {
+    const sessionPath = path.join(sessionsDir, sessionId);
+    fs.mkdirSync(sessionPath, { recursive: true });
+
+    const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+    const store = makeInMemoryStore({ logger: Pino().child({ level: 'silent', stream: 'store' }) });
+    
+    const sock = ToxxicTechConnect({
+        logger: Pino({ level: 'silent' }),
         printQRInTerminal: false,
-        getMessage: async () => ({}),
-        markOnlineOnConnect: false, // Changed to false to prevent premature online status
+        auth: state,
+        connectTimeoutMs: 60000,
+        defaultQueryTimeoutMs: 0,
+        keepAliveIntervalMs: 10000,
         emitOwnEvents: true,
-        keepAliveIntervalMs: 30_000,
-        connectTimeoutMs: 180_000, // Increased timeout
-        defaultQueryTimeoutMs: 90_000,
-        syncFullHistory: false,
-        fireInitQueries: false, // Critical: prevents premature login
-        shouldIgnoreJid: jid => false,
-        linkPreviewImageThumbnailWidth: 192,
-        transactionOpts: { maxCommitRetries: 10, delayBetweenTriesMs: 5000 }
+        fireInitQueries: true,
+        generateHighQualityLinkPreview: true,
+        syncFullHistory: true,
+        markOnlineOnConnect: true,
+        browser: ['Ubuntu', 'Chrome', '20.0.04'],
+        getMessage: async () => ({}),
     });
-};
 
-const cleanupConnection = (sessionId) => {
-    if (connectionManager.has(sessionId)) {
-        const { sock, timer } = connectionManager.get(sessionId);
-        sock?.end();
-        clearTimeout(timer);
-        connectionManager.delete(sessionId);
+    store.bind(sock.ev);
+    
+    // Save credentials when updated
+    sock.ev.on('creds.update', saveCreds);
+
+    // Handle connection updates
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect } = update;
         
-        try {
-            const sessionPath = path.join(sessionDir, sessionId);
-            if (fs.existsSync(sessionPath)) {
-                fs.rmSync(sessionPath, { recursive: true, force: true });
+        if (connection === 'close') {
+            const shouldReconnect = lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut;
+            errorLog(`Connection closed for ${sessionId}. Reconnecting: ${shouldReconnect}`);
+            
+            if (shouldReconnect) {
+                setTimeout(() => createWhatsAppConnection(sessionId, number), 2000);
+            } else {
+                // Clean up if not reconnecting
+                activeConnections.delete(sessionId);
             }
-        } catch (err) {
-            console.error('Error cleaning up session files:', err);
-        }
-    }
-};
-
-app.post('/api/get-pairing-code', async (req, res) => {
-    const { sessionId, phoneNumber } = req.body;
-    if (!sessionId || !phoneNumber) return res.status(400).json({ error: 'Session ID and phone number are required.' });
-    if (!validatePhoneNumber(phoneNumber)) return res.status(400).json({ error: 'Invalid phone number format.' });
-
-    cleanupConnection(sessionId);
-
-    let responded = false;
-    const sendResponse = (status, data) => {
-        if (!responded) {
-            responded = true;
-            return res.status(status).json(data);
-        }
-    };
-
-    try {
-        const { state, saveCreds } = await useMultiFileAuthState(path.join(sessionDir, sessionId));
-        const sock = await createSocket(state, saveCreds);
-        const formattedNumber = phoneNumber.replace(/[^\d]/g, '');
-        const userJid = `${formattedNumber}@s.whatsapp.net`;
-
-        const timer = setTimeout(() => {
-            sendResponse(408, { error: 'Pairing timed out. Try again.' });
-            cleanupConnection(sessionId);
-        }, 180000); // 3 minute timeout
-
-        connectionManager.set(sessionId, { sock, timer });
-
-        sock.ev.on('creds.update', saveCreds);
-
-        // Generate pairing code with robust error handling
-        let code;
-        try {
-            code = await sock.requestPairingCode(formattedNumber);
-            if (!code) throw new Error('Failed to generate pairing code');
-        } catch (err) {
-            console.error('Pairing code generation failed:', err);
-            cleanupConnection(sessionId);
-            return sendResponse(500, { 
-                error: 'Failed to generate pairing code. Please try again.',
-                suggestion: 'Ensure your phone number is correct and has an active WhatsApp account.'
-            });
-        }
-
-        const formattedCode = code.match(/.{1,4}/g)?.join('-') || code;
-
-        // Initial response with just the pairing code
-        sendResponse(200, {
-            sessionId,
-            pairingCode: formattedCode,
-            message: 'Pairing code generated. Enter this code in your WhatsApp linked devices section.'
-        });
-
-        // Connection event handlers
-        sock.ev.on('connection.update', async (update) => {
-            const { connection, lastDisconnect, isNewLogin } = update;
-
-            if (connection === 'open') {
-                clearTimeout(timer);
-                try {
-                    // Wait longer for full initialization
-                    await delay(5000);
-                    
-                    // Get session credentials
-                    const sessionString = Buffer.from(JSON.stringify(sock.authState.creds)).toString('base64');
-                    
-                    // Send session to user's DM
-                    try {
-                        await sock.sendMessage(userJid, {
-                            text: `✅ WhatsApp connected successfully!\n\nSession ID: ${sessionId}\n\nSession credentials:\n${sessionString}`
-                        });
-                    } catch (err) {
-                        console.error('Error sending connection message:', err);
-                        // Fallback - include session in the response if DM fails
-                        if (!responded) {
-                            return sendResponse(200, {
-                                sessionId,
-                                sessionCredentials: sessionString,
-                                message: 'Connected but failed to send session to your DM. Please save these credentials.'
-                            });
-                        }
-                    }
-                    
-                    // Final success response
-                    if (!responded) {
-                        sendResponse(200, {
-                            sessionId,
-                            message: 'Successfully connected and paired. Check your WhatsApp for session details.',
-                            isNewLogin
-                        });
-                    }
-                    
-                    // Clean up after short delay
-                    await delay(2000);
-                    sock.end();
-                    connectionManager.delete(sessionId);
-                } catch (err) {
-                    console.error('Connection open handler error:', err);
-                    if (!responded) {
-                        sendResponse(500, { 
-                            error: 'Connection established but finalization failed.',
-                            details: err.message
-                        });
-                    }
-                    cleanupConnection(sessionId);
-                }
-            }
-
-            if (connection === 'close') {
-                clearTimeout(timer);
-                const reason = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.reason;
-                
-                if (!responded) {
-                    let errorMsg = 'Disconnected during pairing. Try again.';
-                    if (reason === DisconnectReason.connectionLost) {
-                        errorMsg = 'Connection lost. Please try again.';
-                    } else if (reason === DisconnectReason.restartRequired) {
-                        errorMsg = 'Session expired. Please generate a new pairing code.';
-                    } else if (reason === DisconnectReason.badSession) {
-                        errorMsg = 'Invalid session. Please start a new session.';
-                    } else if (reason === DisconnectReason.invalidSession) {
-                        errorMsg = 'Session invalid. Please generate a new code.';
-                    } else if (reason === DisconnectReason.multideviceMismatch) {
-                        errorMsg = 'Multi-device mismatch. Ensure your WhatsApp supports pairing.';
-                    }
-                    
-                    sendResponse(500, { 
-                        error: errorMsg,
-                        code: reason,
-                        suggestion: 'Try using the QR code method if pairing continues to fail.'
-                    });
-                }
-                cleanupConnection(sessionId);
-            }
-        });
-
-        // Handle pairing code entry timeout
-        const pairingTimer = setTimeout(() => {
-            if (!responded) {
-                sendResponse(408, { error: 'Pairing code not entered in time. Please try again.' });
-                cleanupConnection(sessionId);
-            }
-        }, 120000); // 2 minutes to enter code
-
-        connectionManager.get(sessionId).pairingTimer = pairingTimer;
-
-    } catch (err) {
-        cleanupConnection(sessionId);
-        console.error('Pairing error:', err);
-        
-        let userMessage = 'Pairing failed. Please try again.';
-        if (err.message.includes('invalid phone number')) {
-            userMessage = 'Invalid phone number format. Please check and try again.';
-        } else if (err.message.includes('timed out')) {
-            userMessage = 'Request timed out. Please try again.';
-        }
-        
-        sendResponse(500, { 
-            error: userMessage,
-            details: err.message,
-            suggestion: 'Try using the QR code method if pairing continues to fail.'
-        });
-    }
-});
-
-// QR code endpoint (unchanged from previous version)
-app.post('/api/get-qr', async (req, res) => {
-    const { sessionId, phoneNumber } = req.body;
-
-    if (!sessionId) return res.status(400).json({ error: 'Session ID is required.' });
-    if (phoneNumber && !validatePhoneNumber(phoneNumber)) {
-        return res.status(400).json({ error: 'Invalid phone number format.' });
-    }
-
-    cleanupConnection(sessionId);
-
-    let responded = false;
-    const sendResponse = (status, data) => {
-        if (!responded) {
-            responded = true;
-            return res.status(status).json(data);
-        }
-    };
-
-    try {
-        const { state, saveCreds } = await useMultiFileAuthState(path.join(sessionDir, sessionId));
-        const sock = await createSocket(state, saveCreds);
-        const targetNumber = phoneNumber?.replace(/[^\d]/g, '');
-        const userJid = targetNumber ? `${targetNumber}@s.whatsapp.net` : null;
-
-        const timer = setTimeout(() => {
-            sendResponse(408, { error: 'QR code expired. Try again.' });
-            cleanupConnection(sessionId);
-        }, 90000);
-
-        connectionManager.set(sessionId, { sock, timer });
-        sock.ev.on('creds.update', saveCreds);
-
-        sock.ev.on('connection.update', async (update) => {
-            const { qr, connection, lastDisconnect } = update;
-
-            if (qr && !responded) {
-                try {
-                    const url = await qrcode.toDataURL(qr);
-                    sendResponse(200, {
-                        sessionId,
-                        qrCode: url,
-                        message: 'QR code generated. Scan within 90 seconds.'
-                    });
-                } catch (err) {
-                    console.error('QR generation error:', err);
-                    sendResponse(500, { error: 'Failed to generate QR code.' });
-                }
-            }
-
-            if (connection === 'open') {
-                clearTimeout(timer);
-                if (userJid) {
-                    const sessionString = Buffer.from(JSON.stringify(sock.authState.creds)).toString('base64');
-                    try {
-                        await sock.sendMessage(userJid, {
-                            text: `✅ WhatsApp connected!\nSession ID: ${sessionId}\nSession String:\n${sessionString}`
-                        });
-                    } catch (err) {
-                        console.error('Error sending connection message:', err);
-                    }
-                }
-                sendResponse(200, {
-                    sessionId,
-                    message: 'Successfully connected via QR code.'
+        } else if (connection === 'open') {
+            log(`Successfully connected ${sessionId}`);
+            
+            // Send confirmation message
+            const [jid] = Object.keys(sock.user?.contacts || {});
+            if (jid) {
+                await sock.sendMessage(jid, { 
+                    text: `LEVI MD PAIR CONNECTED USE ABOVE SESSION ID\n\n${sessionId.toUpperCase()}`
                 });
-                await delay(1000);
-                sock.end();
-                connectionManager.delete(sessionId);
+                
+                // Close connection after sending message
+                setTimeout(() => {
+                    log(`Closing connection for ${sessionId} after confirmation`);
+                    sock.ws.close();
+                    activeConnections.delete(sessionId);
+                }, 5000);
             }
+        }
+    });
 
-            if (connection === 'close') {
-                clearTimeout(timer);
-                const reason = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.reason;
-                if (reason === DisconnectReason.connectionLost) {
-                    sendResponse(500, { error: 'Connection lost. Please try again.' });
-                } else if (reason === DisconnectReason.restartRequired) {
-                    sendResponse(500, { error: 'Session expired. Please scan a new QR code.' });
-                } else {
-                    sendResponse(500, { error: 'Disconnected during QR scan. Try again.' });
-                }
-                connectionManager.delete(sessionId);
+    return sock;
+}
+
+// Pairing endpoint
+app.post('/pair', async (req, res) => {
+    const { number } = req.body;
+    if (!number) return res.status(400).json({ error: 'Phone number required' });
+
+    const sessionId = generateSessionId();
+    
+    try {
+        // Check if this number is already being processed
+        for (const [id, conn] of activeConnections) {
+            if (conn.number === number) {
+                return res.status(400).json({ 
+                    error: 'This number is already being processed', 
+                    existingSessionId: id 
+                });
             }
+        }
+
+        const sock = await createWhatsAppConnection(sessionId, number);
+        
+        // Request pairing code
+        const code = await sock.requestPairingCode(number.replace(/[^\d]/g, ''));
+        if (!code) throw new Error('Failed to get pairing code');
+        
+        // Format the code as XXXX-XXXX
+        const formattedCode = code.match(/.{1,4}/g)?.join('-') || code;
+        
+        // Store the active connection
+        activeConnections.set(sessionId, { 
+            sock, 
+            number,
+            createdAt: Date.now() 
         });
-    } catch (err) {
-        cleanupConnection(sessionId);
-        console.error('QR session error:', err);
-        sendResponse(500, { error: err.message });
+
+        // Set timeout to clean up if connection stalls
+        setTimeout(() => {
+            if (activeConnections.has(sessionId)) {
+                log(`Cleaning up stalled connection for ${sessionId}`);
+                activeConnections.get(sessionId)?.sock?.ws?.close();
+                activeConnections.delete(sessionId);
+            }
+        }, 300000); // 5 minutes timeout
+
+        res.json({ 
+            sessionId,
+            code: formattedCode,
+            message: 'Check your WhatsApp for connection confirmation'
+        });
+        
+    } catch (error) {
+        errorLog(`Pairing error: ${error.message}`);
+        
+        // Clean up if error occurs
+        const sessionPath = path.join(sessionsDir, sessionId);
+        if (fs.existsSync(sessionPath)) {
+            fs.rmSync(sessionPath, { recursive: true });
+        }
+        activeConnections.get(sessionId)?.sock?.ws?.close();
+        activeConnections.delete(sessionId);
+        
+        res.status(500).json({ error: error.message });
     }
 });
 
-// UI routes
-app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
-app.get('/qr', (req, res) => res.sendFile(path.join(__dirname, 'public', 'qr.html')));
-app.get('/pair', (req, res) => res.sendFile(path.join(__dirname, 'public', 'pair.html')));
-
-// Graceful shutdown
-process.on('SIGINT', () => {
-    console.log('Shutting down server...');
-    connectionManager.forEach(({ sock, timer }, id) => {
-        sock?.end();
-        clearTimeout(timer);
-        console.log(`Closed session: ${id}`);
-    });
-    process.exit();
+// Download endpoint
+app.get('/:sessionId', (req, res) => {
+    const { sessionId } = req.params;
+    const sessionPath = path.join(sessionsDir, sessionId);
+    
+    if (!fs.existsSync(sessionPath)) {
+        return res.status(404).send('Session not found');
+    }
+    
+    createZip(sessionId, res);
 });
 
-app.listen(PORT, () => console.log(`Server running on http://localhost:${PORT}`));
+// Cleanup interval for stale connections
+setInterval(() => {
+    const now = Date.now();
+    for (const [sessionId, conn] of activeConnections) {
+        if (now - conn.createdAt > 3600000) { // 1 hour
+            log(`Cleaning up stale connection for ${sessionId}`);
+            conn.sock?.ws?.close();
+            activeConnections.delete(sessionId);
+        }
+    }
+}, 60000); // Check every minute
+
+// Start server
+app.listen(PORT, () => {
+    log(`Server running on http://localhost:${PORT}`);
+});
