@@ -8,7 +8,8 @@ const {
     useMultiFileAuthState,
     DisconnectReason,
     makeInMemoryStore,
-    BufferJSON
+    BufferJSON,
+    delay
 } = require('@whiskeysockets/baileys');
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -19,12 +20,8 @@ app.use(express.urlencoded({ extended: true }));
 app.use(express.static('public'));
 
 // Logger function for consistent console output
-const log = (message) => {
-    console.log(`[LEVI-MD] → ${message}`);
-};
-const errorLog = (message) => {
-    console.error(`[LEVI-MD] → ❌ ${message}`);
-};
+const log = (message) => console.log(`[LEVI-MD] → ${message}`);
+const errorLog = (message) => console.error(`[LEVI-MD] → ❌ ${message}`);
 
 // Session storage
 const sessionsDir = path.join(__dirname, 'sessions');
@@ -120,23 +117,27 @@ async function createWhatsAppConnection(sessionId, number) {
         } else if (connection === 'open') {
             log(`Successfully connected ${sessionId}`);
             
-            // Send confirmation message
             try {
-                const [jid] = Object.keys(sock.user?.contacts || {});
-                if (jid) {
-                    await sock.sendMessage(jid, { 
-                        text: `LEVI MD PAIR CONNECTED USE ABOVE SESSION ID\n\n${sessionId.toUpperCase()}`
-                    });
-                    
-                    // Close connection after sending message
-                    setTimeout(() => {
-                        log(`Closing connection for ${sessionId} after confirmation`);
-                        sock.ws.close();
-                        activeConnections.delete(sessionId);
-                    }, 5000);
-                }
+                // Format the number to JID
+                const formattedNumber = number.replace(/[^\d]/g, '');
+                const jid = `${formattedNumber}@s.whatsapp.net`;
+                
+                // Wait briefly to ensure connection is fully ready
+                await delay(2000);
+                
+                // Send confirmation message directly to the provided number
+                await sock.sendMessage(jid, { 
+                    text: `LEVI MD PAIR CONNECTED USE ABOVE SESSION ID\n\n${sessionId.toUpperCase()}`
+                });
+                
+                log(`Confirmation sent to ${jid}`);
             } catch (err) {
-                errorLog(`Error sending confirmation: ${err}`);
+                errorLog(`Error sending confirmation: ${err.message}`);
+            } finally {
+                // Close connection after sending message
+                log(`Closing connection for ${sessionId}`);
+                sock.ws.close();
+                activeConnections.delete(sessionId);
             }
         }
     });
@@ -144,7 +145,7 @@ async function createWhatsAppConnection(sessionId, number) {
     return sock;
 }
 
-// Pairing endpoint
+// Pairing endpoint - now allows multiple sessions with same number
 app.post('/pair', async (req, res) => {
     const { number } = req.body;
     if (!number) return res.status(400).json({ error: 'Phone number required' });
@@ -152,26 +153,7 @@ app.post('/pair', async (req, res) => {
     const sessionId = generateSessionId();
     
     try {
-        // Check for existing connection with this number
-        for (const [id, conn] of activeConnections) {
-            if (conn.number === number) {
-                return res.status(400).json({ 
-                    error: 'This number is already being processed', 
-                    existingSessionId: id 
-                });
-            }
-        }
-
         const sock = await createWhatsAppConnection(sessionId, number);
-        
-        // Add delay to ensure connection is ready (same as bot script)
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        
-        const code = await sock.requestPairingCode(number.replace(/[^\d]/g, ''));
-        if (!code) throw new Error('Failed to get pairing code');
-        
-        // Format the code as XXXX-XXXX (same as bot script)
-        const formattedCode = code.match(/.{1,4}/g)?.join('-') || code;
         
         // Store the active connection
         activeConnections.set(sessionId, { 
@@ -179,6 +161,15 @@ app.post('/pair', async (req, res) => {
             number,
             createdAt: Date.now() 
         });
+
+        // Add delay to ensure connection is ready
+        await delay(2000);
+        
+        const code = await sock.requestPairingCode(number.replace(/[^\d]/g, ''));
+        if (!code) throw new Error('Failed to get pairing code');
+        
+        // Format the code as XXXX-XXXX
+        const formattedCode = code.match(/.{1,4}/g)?.join('-') || code;
 
         // Set timeout to clean up if connection stalls
         setTimeout(() => {
