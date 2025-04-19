@@ -25,18 +25,18 @@ if (!fs.existsSync(sessionDir)) {
     fs.mkdirSync(sessionDir, { recursive: true });
 }
 
-// Active connections map
-const activeSockets = new Map();
+// Connection manager
+const connectionManager = new Map();
 
 // Validate phone number format (e.g., 2347087243475)
 const validatePhoneNumber = (number) => {
     const cleaned = number.replace(/[^\d]/g, '');
-    return cleaned.length >= 10 && cleaned.length <= 19;
+    return cleaned.length >= 10 && cleaned.length <= 15;
 };
 
 // HTML Routes
 app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'pair.html'));
+    res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 app.get('/qr', (req, res) => {
@@ -90,51 +90,80 @@ app.post('/api/get-pairing-code', async (req, res) => {
         return res.status(400).json({ error: 'Invalid phone number format. Use format like 2347087243475' });
     }
 
+    // Check for existing connection
+    if (connectionManager.has(sessionId)) {
+        const existing = connectionManager.get(sessionId);
+        if (existing.connected) {
+            return res.status(400).json({ error: 'Session already connected' });
+        }
+        existing.sock.end(); // Clean up previous connection
+    }
+
     try {
         const { state, saveCreds } = await useMultiFileAuthState(path.join(sessionDir, sessionId));
         const sock = makeWASocket({
             auth: state,
             printQRInTerminal: false,
             browser: Browsers.ubuntu('Chrome'),
-            getMessage: async () => ({})
+            getMessage: async () => ({}),
+            connectTimeoutMs: 60000 // Wait up to 60 seconds for connection
         });
 
-        activeSockets.set(sessionId, sock);
+        const formattedNumber = phoneNumber.replace(/[^\d]/g, '');
+        const userJid = `${formattedNumber}@s.whatsapp.net`;
+
+        // Store connection info
+        const connectionInfo = {
+            sock,
+            connected: false,
+            timer: setTimeout(() => {
+                if (!connectionInfo.connected) {
+                    sock.end();
+                    connectionManager.delete(sessionId);
+                }
+            }, 60000) // 60 second timeout
+        };
+        connectionManager.set(sessionId, connectionInfo);
 
         sock.ev.on('creds.update', saveCreds);
         
-        const formattedNumber = phoneNumber.replace(/[^\d]/g, '');
+        // Generate pairing code
         const code = await sock.requestPairingCode(formattedNumber);
         const formattedCode = code.match(/.{1,4}/g)?.join('-') || code;
 
-        // Handle successful connection
+        // Handle connection events
         sock.ev.on('connection.update', async (update) => {
             if (update.connection === 'open') {
-                await delay(2000); // Wait for full connection
+                connectionInfo.connected = true;
+                clearTimeout(connectionInfo.timer);
                 
                 try {
                     const sessionString = Buffer.from(JSON.stringify(sock.authState.creds)).toString('base64');
-                    const userJid = `${formattedNumber}@s.whatsapp.net`;
                     
                     await sock.sendMessage(userJid, { 
                         text: `✅ WhatsApp connection established!\n\nYour Session ID: ${sessionId}\n\nSession String:\n${sessionString}` 
                     });
                     
                     await delay(1000);
-                    sock.end(); // Disconnect after sending
-                    activeSockets.delete(sessionId);
+                    sock.end();
+                    connectionManager.delete(sessionId);
                 } catch (sendError) {
                     console.error('Failed to send confirmation:', sendError);
                 }
+            } else if (update.connection === 'close') {
+                clearTimeout(connectionInfo.timer);
+                connectionManager.delete(sessionId);
             }
         });
 
         res.json({ 
             sessionId,
             pairingCode: formattedCode,
-            message: 'Pairing code generated successfully'
+            message: 'Pairing code generated successfully. You have 60 seconds to connect.'
         });
+
     } catch (error) {
+        console.error('Pairing error:', error);
         res.status(500).json({ error: error.message });
     }
 });
@@ -150,21 +179,44 @@ app.post('/api/get-qr', async (req, res) => {
         return res.status(400).json({ error: 'Invalid phone number format. Use format like 2347087243475' });
     }
 
+    // Check for existing connection
+    if (connectionManager.has(sessionId)) {
+        const existing = connectionManager.get(sessionId);
+        if (existing.connected) {
+            return res.status(400).json({ error: 'Session already connected' });
+        }
+        existing.sock.end(); // Clean up previous connection
+    }
+
     try {
         const { state, saveCreds } = await useMultiFileAuthState(path.join(sessionDir, sessionId));
         const sock = makeWASocket({
             auth: state,
             printQRInTerminal: false,
             browser: Browsers.ubuntu('Chrome'),
-            getMessage: async () => ({})
+            getMessage: async () => ({}),
+            connectTimeoutMs: 60000 // Wait up to 60 seconds for connection
         });
 
-        activeSockets.set(sessionId, sock);
+        const targetNumber = phoneNumber ? phoneNumber.replace(/[^\d]/g, '') : null;
+        const userJid = targetNumber ? `${targetNumber}@s.whatsapp.net` : null;
+
+        // Store connection info
+        const connectionInfo = {
+            sock,
+            connected: false,
+            timer: setTimeout(() => {
+                if (!connectionInfo.connected) {
+                    sock.end();
+                    connectionManager.delete(sessionId);
+                }
+            }, 60000) // 60 second timeout
+        };
+        connectionManager.set(sessionId, connectionInfo);
 
         sock.ev.on('creds.update', saveCreds);
-        
-        let targetNumber = phoneNumber ? phoneNumber.replace(/[^\d]/g, '') : null;
 
+        // Handle connection events
         sock.ev.on('connection.update', async (update) => {
             const { qr, connection } = update;
             
@@ -174,40 +226,46 @@ app.post('/api/get-qr', async (req, res) => {
                         res.json({ 
                             sessionId,
                             qrCode: url,
-                            message: 'QR code generated successfully'
+                            message: 'QR code generated successfully. Scan within 60 seconds.'
                         });
                     }
                 });
             }
 
-            if (connection === 'open' && targetNumber) {
-                await delay(2000); // Wait for full connection
+            if (connection === 'open') {
+                connectionInfo.connected = true;
+                clearTimeout(connectionInfo.timer);
                 
-                try {
-                    const sessionString = Buffer.from(JSON.stringify(sock.authState.creds)).toString('base64');
-                    const userJid = `${targetNumber}@s.whatsapp.net`;
-                    
-                    await sock.sendMessage(userJid, { 
-                        text: `✅ WhatsApp connection established!\n\nYour Session ID: ${sessionId}\n\nSession String:\n${sessionString}` 
-                    });
-                    
-                    await delay(1000);
-                    sock.end(); // Disconnect after sending
-                    activeSockets.delete(sessionId);
-                } catch (sendError) {
-                    console.error('Failed to send confirmation:', sendError);
+                if (userJid) {
+                    try {
+                        const sessionString = Buffer.from(JSON.stringify(sock.authState.creds)).toString('base64');
+                        await sock.sendMessage(userJid, { 
+                            text: `✅ WhatsApp connection established!\n\nYour Session ID: ${sessionId}\n\nSession String:\n${sessionString}` 
+                        });
+                    } catch (sendError) {
+                        console.error('Failed to send confirmation:', sendError);
+                    }
                 }
+                
+                await delay(1000);
+                sock.end();
+                connectionManager.delete(sessionId);
+            } else if (connection === 'close') {
+                clearTimeout(connectionInfo.timer);
+                connectionManager.delete(sessionId);
             }
         });
     } catch (error) {
+        console.error('QR generation error:', error);
         res.status(500).json({ error: error.message });
     }
 });
 
 // Cleanup on server close
 process.on('SIGINT', () => {
-    activeSockets.forEach((sock, id) => {
-        sock.end();
+    connectionManager.forEach((info, id) => {
+        info.sock.end();
+        clearTimeout(info.timer);
         console.log(`Closed connection for session: ${id}`);
     });
     process.exit();
