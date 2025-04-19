@@ -1,114 +1,88 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
-    <title>WhatsApp Auth</title>
-    <style>
-        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
-        .method { margin-bottom: 30px; padding: 20px; border: 1px solid #ddd; border-radius: 5px; }
-        button { padding: 10px 15px; background: #25D366; color: white; border: none; border-radius: 5px; cursor: pointer; }
-        input { padding: 8px; width: 100%; margin: 5px 0 15px; }
-        .result { margin-top: 15px; padding: 10px; background: #f5f5f5; border-radius: 5px; }
-    </style>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>WhatsApp Pairing Code</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      background: #111;
+      color: #fff;
+      padding: 40px;
+    }
+    input, button {
+      padding: 10px;
+      margin: 10px 0;
+      width: 100%;
+      max-width: 400px;
+    }
+    button {
+      background: #0f0;
+      border: none;
+      color: #000;
+      cursor: pointer;
+      font-weight: bold;
+    }
+    .response {
+      margin-top: 20px;
+      padding: 20px;
+      background: #222;
+      border: 1px solid #444;
+      max-width: 600px;
+    }
+  </style>
 </head>
 <body>
-    <h1>WhatsApp Authentication</h1>
-    
-    <div class="method">
-        <h2>1. Generate Session ID</h2>
-        <input type="text" id="sessionId" placeholder="Enter session name">
-        <button onclick="generateSession()">Generate Session</button>
-        <div id="sessionResult" class="result"></div>
-    </div>
-    
-    <div class="method">
-        <h2>2. Get Pairing Code</h2>
-        <input type="text" id="pairSessionId" placeholder="Enter session name">
-        <input type="text" id="phoneNumber" placeholder="Enter phone number with country code">
-        <button onclick="getPairingCode()">Get Pairing Code</button>
-        <div id="pairResult" class="result"></div>
-    </div>
-    
-    <div class="method">
-        <h2>3. Get QR Code</h2>
-        <input type="text" id="qrSessionId" placeholder="Enter session name">
-        <button onclick="getQRCode()">Get QR Code</button>
-        <div id="qrResult" class="result"></div>
-        <img id="qrImage" style="display: none; margin-top: 15px; max-width: 300px;">
-    </div>
+  <h1>Generate WhatsApp Pairing Code</h1>
 
-    <script>
-        async function generateSession() {
-            const sessionId = document.getElementById('sessionId').value;
-            if (!sessionId) return alert('Session name is required');
-            
-            const response = await fetch('/api/generate-session', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ sessionId })
-            });
-            
-            const data = await response.json();
-            const resultDiv = document.getElementById('sessionResult');
-            
-            if (response.ok) {
-                resultDiv.innerHTML = `
-                    <strong>Session ID:</strong> ${data.sessionId}<br>
-                    <strong>Session String:</strong> ${data.sessionString}<br>
-                    <small>Copy this string and use it as SESSION_ID in your environment variables</small>
-                `;
-            } else {
-                resultDiv.innerHTML = `<strong>Error:</strong> ${data.error}`;
-            }
+  <form id="pairForm">
+    <input type="text" id="sessionId" placeholder="Enter Session ID" required />
+    <input type="text" id="phoneNumber" placeholder="Enter Phone Number" required />
+    <button type="submit">Get Pairing Code</button>
+  </form>
+
+  <div class="response" id="response" style="display: none;"></div>
+
+  <script>
+    const form = document.getElementById('pairForm');
+    const responseBox = document.getElementById('response');
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const sessionId = document.getElementById('sessionId').value.trim();
+      const phoneNumber = document.getElementById('phoneNumber').value.trim();
+
+      responseBox.style.display = 'none';
+      responseBox.innerHTML = 'Generating pairing code...';
+
+      try {
+        const res = await fetch('/api/get-pairing-code', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionId, phoneNumber })
+        });
+
+        const data = await res.json();
+        responseBox.style.display = 'block';
+
+        if (res.ok) {
+          responseBox.innerHTML = `
+            <strong>Pairing Code:</strong> <pre>${data.pairingCode}</pre><br/>
+            <strong>Message:</strong> ${data.message}<br/>
+            <strong>Session ID:</strong> ${data.sessionId}
+          `;
+        } else {
+          responseBox.innerHTML = `
+            <strong>Error:</strong> ${data.error}<br/>
+            <strong>Suggestion:</strong> ${data.suggestion || 'None'}
+          `;
         }
-        
-        async function getPairingCode() {
-            const sessionId = document.getElementById('pairSessionId').value;
-            const phoneNumber = document.getElementById('phoneNumber').value;
-            if (!sessionId || !phoneNumber) return alert('Both fields are required');
-            
-            const response = await fetch('/api/get-pairing-code', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ sessionId, phoneNumber })
-            });
-            
-            const data = await response.json();
-            const resultDiv = document.getElementById('pairResult');
-            
-            if (response.ok) {
-                resultDiv.innerHTML = `
-                    <strong>Session ID:</strong> ${data.sessionId}<br>
-                    <strong>Pairing Code:</strong> ${data.pairingCode}<br>
-                    <small>Enter this code in your WhatsApp linked devices</small>
-                `;
-            } else {
-                resultDiv.innerHTML = `<strong>Error:</strong> ${data.error}`;
-            }
-        }
-        
-        async function getQRCode() {
-            const sessionId = document.getElementById('qrSessionId').value;
-            if (!sessionId) return alert('Session name is required');
-            
-            const response = await fetch('/api/get-qr', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ sessionId })
-            });
-            
-            const data = await response.json();
-            const resultDiv = document.getElementById('qrResult');
-            const qrImage = document.getElementById('qrImage');
-            
-            if (response.ok) {
-                resultDiv.innerHTML = `<strong>Session ID:</strong> ${data.sessionId}`;
-                qrImage.src = data.qrCode;
-                qrImage.style.display = 'block';
-            } else {
-                resultDiv.innerHTML = `<strong>Error:</strong> ${data.error}`;
-                qrImage.style.display = 'none';
-            }
-        }
-    </script>
+      } catch (err) {
+        responseBox.style.display = 'block';
+        responseBox.innerHTML = `<strong>Error:</strong> ${err.message}`;
+      }
+    });
+  </script>
 </body>
 </html>
