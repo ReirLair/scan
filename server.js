@@ -248,7 +248,7 @@ app.get('/:sessionId', (req, res) => {
 setInterval(() => {
     const now = Date.now();
     for (const [sessionId, conn] of activeConnections) {
-        if (now - conn.createdAt > 3600000)) { // 1 hour
+        if (now - conn.createdAt > 3600000) { // 1 hour
             log(`Cleaning up stale connection for ${sessionId}`);
             try {
                 conn.sock?.ws?.close();
