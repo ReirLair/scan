@@ -31,12 +31,12 @@ const activeSockets = new Map();
 // Validate phone number format (e.g., 2347087243475)
 const validatePhoneNumber = (number) => {
     const cleaned = number.replace(/[^\d]/g, '');
-    return cleaned.length >= 10 && cleaned.length <= 15;
+    return cleaned.length >= 10 && cleaned.length <= 19;
 };
 
 // HTML Routes
 app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'index.html'));
+    res.sendFile(path.join(__dirname, 'public', 'pair.html'));
 });
 
 app.get('/qr', (req, res) => {
