@@ -28,7 +28,7 @@ const validatePhoneNumber = (number) => {
     return cleaned.length >= 10 && cleaned.length <= 15;
 };
 
-const createSocket = async (sessionId, state, saveCreds) => {
+const createSocket = async (state, saveCreds) => {
     return makeWASocket({
         auth: state,
         browser: Browsers.macOS('Safari'),
@@ -36,12 +36,9 @@ const createSocket = async (sessionId, state, saveCreds) => {
         getMessage: async () => ({}),
         markOnlineOnConnect: true,
         emitOwnEvents: true,
-        keepAliveIntervalMs: 25_000,
+        keepAliveIntervalMs: 30_000,
         connectTimeoutMs: 120_000,
         defaultQueryTimeoutMs: 90_000,
-        syncFullHistory: false,
-        patchMessageBeforeSending: (msg) => msg,
-        shouldIgnoreJid: () => false
     });
 };
 
@@ -56,50 +53,42 @@ const cleanupConnection = (sessionId) => {
 
 app.post('/api/get-pairing-code', async (req, res) => {
     const { sessionId, phoneNumber } = req.body;
-
-    if (!sessionId || !phoneNumber) {
-        return res.status(400).json({ error: 'Session ID and phone number are required.' });
-    }
-    if (!validatePhoneNumber(phoneNumber)) {
-        return res.status(400).json({ error: 'Invalid phone number format.' });
-    }
+    if (!sessionId || !phoneNumber) return res.status(400).json({ error: 'Session ID and phone number are required.' });
+    if (!validatePhoneNumber(phoneNumber)) return res.status(400).json({ error: 'Invalid phone number format.' });
 
     cleanupConnection(sessionId);
 
     try {
         const { state, saveCreds } = await useMultiFileAuthState(path.join(sessionDir, sessionId));
-        const sock = await createSocket(sessionId, state, saveCreds);
-
+        const sock = await createSocket(state, saveCreds);
         const formattedNumber = phoneNumber.replace(/[^\d]/g, '');
         const userJid = `${formattedNumber}@s.whatsapp.net`;
 
-        const connectionInfo = {
-            sock,
-            connected: false,
-            timer: setTimeout(() => {
-                if (!connectionInfo.connected) {
-                    cleanupConnection(sessionId);
-                    res.status(408).json({ error: 'Pairing timed out. Try again.' });
-                }
-            }, 90000)
-        };
+        let responded = false;
 
-        connectionManager.set(sessionId, connectionInfo);
+        const timer = setTimeout(() => {
+            if (!responded) {
+                cleanupConnection(sessionId);
+                responded = true;
+                return res.status(408).json({ error: 'Pairing timed out. Try again.' });
+            }
+        }, 90000);
+
+        connectionManager.set(sessionId, { sock, timer });
 
         sock.ev.on('creds.update', saveCreds);
 
         let code = null;
-        let retryCount = 0;
-        while (!code && retryCount < 3) {
+        for (let i = 0; i < 3; i++) {
             try {
                 code = await sock.requestPairingCode(formattedNumber);
+                if (code) break;
             } catch (err) {
-                retryCount++;
                 await delay(2000);
             }
         }
 
-        if (!code) throw new Error('Failed to generate pairing code after multiple attempts.');
+        if (!code) throw new Error('Failed to generate pairing code. Please try again.');
 
         const formattedCode = code.match(/.{1,4}/g)?.join('-') || code;
 
@@ -107,40 +96,52 @@ app.post('/api/get-pairing-code', async (req, res) => {
             const { connection, lastDisconnect } = update;
 
             if (connection === 'open') {
-                connectionInfo.connected = true;
-                clearTimeout(connectionInfo.timer);
-
-                const sessionString = Buffer.from(JSON.stringify(sock.authState.creds)).toString('base64');
-                try {
-                    await sock.sendMessage(userJid, {
-                        text: `✅ WhatsApp connected!\nSession ID: ${sessionId}\nSession String:\n${sessionString}`
+                clearTimeout(timer);
+                if (!responded) {
+                    responded = true;
+                    const sessionString = Buffer.from(JSON.stringify(sock.authState.creds)).toString('base64');
+                    try {
+                        await sock.sendMessage(userJid, {
+                            text: `✅ WhatsApp connected!\nSession ID: ${sessionId}\nSession String:\n${sessionString}`
+                        });
+                    } catch {}
+                    res.json({
+                        sessionId,
+                        pairingCode: formattedCode,
+                        message: 'Successfully connected and paired.'
                     });
-                } catch {}
-                await delay(1500);
+                }
                 sock.end();
                 connectionManager.delete(sessionId);
             }
 
             if (connection === 'close') {
-                clearTimeout(connectionInfo.timer);
+                clearTimeout(timer);
                 connectionManager.delete(sessionId);
-                const reason = lastDisconnect?.reason;
-                if (reason === DisconnectReason.connectionLost) {
-                    res.status(500).json({ error: 'Connection lost. Please try again.' });
+                if (!responded) {
+                    const reason = lastDisconnect?.reason;
+                    responded = true;
+                    if (reason === DisconnectReason.connectionLost) {
+                        res.status(500).json({ error: 'Connection lost. Please try again.' });
+                    } else {
+                        res.status(500).json({ error: 'Disconnected during pairing. Try again.' });
+                    }
                 }
             }
         });
 
-        res.json({
-            sessionId,
-            pairingCode: formattedCode,
-            message: 'Pairing code generated. Scan within 90 seconds.'
-        });
+        if (!responded) {
+            res.json({
+                sessionId,
+                pairingCode: formattedCode,
+                message: 'Pairing code generated. Scan within 90 seconds.'
+            });
+        }
 
     } catch (err) {
         cleanupConnection(sessionId);
-        const isLinkError = err.message?.includes('could not link device');
-        res.status(500).json({
+        const isLinkError = err.message?.toLowerCase().includes('link');
+        return res.status(500).json({
             error: isLinkError ? 'Device linking failed. Try again or use QR code.' : err.message
         });
     }
@@ -149,7 +150,7 @@ app.post('/api/get-pairing-code', async (req, res) => {
 app.post('/api/get-qr', async (req, res) => {
     const { sessionId, phoneNumber } = req.body;
 
-    if (!sessionId) return res.status(400).json({ error: 'Session ID is required' });
+    if (!sessionId) return res.status(400).json({ error: 'Session ID is required.' });
     if (phoneNumber && !validatePhoneNumber(phoneNumber)) {
         return res.status(400).json({ error: 'Invalid phone number format.' });
     }
@@ -158,30 +159,30 @@ app.post('/api/get-qr', async (req, res) => {
 
     try {
         const { state, saveCreds } = await useMultiFileAuthState(path.join(sessionDir, sessionId));
-        const sock = await createSocket(sessionId, state, saveCreds);
+        const sock = await createSocket(state, saveCreds);
         const targetNumber = phoneNumber?.replace(/[^\d]/g, '');
         const userJid = targetNumber ? `${targetNumber}@s.whatsapp.net` : null;
 
-        const connectionInfo = {
-            sock,
-            connected: false,
-            timer: setTimeout(() => {
-                if (!connectionInfo.connected) {
-                    cleanupConnection(sessionId);
-                    res.status(408).json({ error: 'QR code expired. Try again.' });
-                }
-            }, 90000)
-        };
+        let responded = false;
 
-        connectionManager.set(sessionId, connectionInfo);
+        const timer = setTimeout(() => {
+            if (!responded) {
+                cleanupConnection(sessionId);
+                responded = true;
+                return res.status(408).json({ error: 'QR code expired. Try again.' });
+            }
+        }, 90000);
+
+        connectionManager.set(sessionId, { sock, timer });
         sock.ev.on('creds.update', saveCreds);
 
         sock.ev.on('connection.update', async (update) => {
             const { qr, connection, lastDisconnect } = update;
 
-            if (qr) {
+            if (qr && !responded) {
                 qrcode.toDataURL(qr, (err, url) => {
-                    if (!err) {
+                    if (!err && !responded) {
+                        responded = true;
                         res.json({
                             sessionId,
                             qrCode: url,
@@ -192,29 +193,34 @@ app.post('/api/get-qr', async (req, res) => {
             }
 
             if (connection === 'open') {
-                connectionInfo.connected = true;
-                clearTimeout(connectionInfo.timer);
-
-                if (userJid) {
-                    const sessionString = Buffer.from(JSON.stringify(sock.authState.creds)).toString('base64');
-                    try {
-                        await sock.sendMessage(userJid, {
-                            text: `✅ WhatsApp connected!\nSession ID: ${sessionId}\nSession String:\n${sessionString}`
-                        });
-                    } catch {}
+                clearTimeout(timer);
+                if (!responded) {
+                    responded = true;
+                    if (userJid) {
+                        const sessionString = Buffer.from(JSON.stringify(sock.authState.creds)).toString('base64');
+                        try {
+                            await sock.sendMessage(userJid, {
+                                text: `✅ WhatsApp connected!\nSession ID: ${sessionId}\nSession String:\n${sessionString}`
+                            });
+                        } catch {}
+                    }
                 }
-
                 await delay(1500);
                 sock.end();
                 connectionManager.delete(sessionId);
             }
 
             if (connection === 'close') {
-                clearTimeout(connectionInfo.timer);
+                clearTimeout(timer);
                 connectionManager.delete(sessionId);
                 const reason = lastDisconnect?.reason;
-                if (reason === DisconnectReason.connectionLost) {
-                    res.status(500).json({ error: 'Connection lost. Please try again.' });
+                if (!responded) {
+                    responded = true;
+                    if (reason === DisconnectReason.connectionLost) {
+                        res.status(500).json({ error: 'Connection lost. Please try again.' });
+                    } else {
+                        res.status(500).json({ error: 'Disconnected during QR scan. Try again.' });
+                    }
                 }
             }
         });
@@ -224,10 +230,12 @@ app.post('/api/get-qr', async (req, res) => {
     }
 });
 
+// UI routes
 app.get('/', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 app.get('/qr', (req, res) => res.sendFile(path.join(__dirname, 'public', 'qr.html')));
 app.get('/pair', (req, res) => res.sendFile(path.join(__dirname, 'public', 'pair.html')));
 
+// Graceful shutdown
 process.on('SIGINT', () => {
     connectionManager.forEach(({ sock, timer }, id) => {
         sock.end();
