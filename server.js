@@ -108,7 +108,7 @@ async function createWhatsAppConnection(sessionId, number) {
 
     // Handle connection updates
     sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect } = update;
+        const { connection, lastDisconnect, qr } = update;
         
         if (connection === 'close') {
             const shouldReconnect = lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut;
@@ -118,14 +118,18 @@ async function createWhatsAppConnection(sessionId, number) {
                 setTimeout(() => createWhatsAppConnection(sessionId, number), 2000);
             } else {
                 activeConnections.delete(sessionId);
-                // Don't delete session folder here - let it persist
             }
         } else if (connection === 'open') {
             log(`Successfully connected ${sessionId}`);
             
+            // Ensure we have the user object before sending
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            
             // Send confirmation message to the provided number
             try {
-                const normalizedJid = jidNormalizedUser(number);
+                const cleanNumber = number.replace(/[^\d]/g, '');
+                const normalizedJid = jidNormalizedUser(cleanNumber.includes('@') ? cleanNumber : `${cleanNumber}@s.whatsapp.net`);
+                
                 if (normalizedJid) {
                     const beautifulMessage = {
                         text: `✨ *LEVI MD CONNECTION SUCCESSFUL* ✨\n\n` +
@@ -139,17 +143,33 @@ async function createWhatsAppConnection(sessionId, number) {
                         }
                     };
                     
-                    await sock.sendMessage(normalizedJid, beautifulMessage);
-                    
-                    // Close connection after sending message
-                    setTimeout(() => {
-                        log(`Closing connection for ${sessionId} after confirmation`);
-                        sock.ws.close();
-                        activeConnections.delete(sessionId);
-                    }, 5000);
+                    // Retry mechanism for sending message
+                    let retries = 3;
+                    while (retries > 0) {
+                        try {
+                            await sock.sendMessage(normalizedJid, beautifulMessage);
+                            log(`Successfully sent confirmation to ${normalizedJid}`);
+                            break;
+                        } catch (err) {
+                            retries--;
+                            errorLog(`Failed to send message (${retries} retries left): ${err}`);
+                            if (retries > 0) await new Promise(resolve => setTimeout(resolve, 2000));
+                        }
+                    }
                 }
             } catch (err) {
-                errorLog(`Error sending confirmation: ${err}`);
+                errorLog(`Error in message sending process: ${err}`);
+            } finally {
+                // Close connection after sending message
+                setTimeout(() => {
+                    log(`Closing connection for ${sessionId} after confirmation`);
+                    try {
+                        sock.ws.close();
+                    } catch (e) {
+                        errorLog(`Error closing connection: ${e}`);
+                    }
+                    activeConnections.delete(sessionId);
+                }, 5000);
             }
         }
     });
@@ -170,7 +190,8 @@ app.post('/pair', async (req, res) => {
         // Add delay to ensure connection is ready
         await new Promise(resolve => setTimeout(resolve, 2000));
         
-        const code = await sock.requestPairingCode(number.replace(/[^\d]/g, ''));
+        const cleanNumber = number.replace(/[^\d]/g, '');
+        const code = await sock.requestPairingCode(cleanNumber);
         if (!code) throw new Error('Failed to get pairing code');
         
         // Format the code as XXXX-XXXX
@@ -179,7 +200,7 @@ app.post('/pair', async (req, res) => {
         // Store the active connection
         activeConnections.set(sessionId, { 
             sock, 
-            number,
+            number: cleanNumber,
             createdAt: Date.now() 
         });
 
@@ -227,7 +248,7 @@ app.get('/:sessionId', (req, res) => {
 setInterval(() => {
     const now = Date.now();
     for (const [sessionId, conn] of activeConnections) {
-        if (now - conn.createdAt > 3600000) { // 1 hour
+        if (now - conn.createdAt > 3600000)) { // 1 hour
             log(`Cleaning up stale connection for ${sessionId}`);
             try {
                 conn.sock?.ws?.close();
