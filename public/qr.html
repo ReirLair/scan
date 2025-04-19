@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>WhatsApp QR Code</title>
+    <style>
+        body { 
+            font-family: Arial, sans-serif; 
+            max-width: 500px; 
+            margin: 0 auto; 
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 25px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        h1 {
+            color: #25D366;
+            margin-bottom: 30px;
+        }
+        #qrImage {
+            max-width: 300px;
+            margin: 20px auto;
+            display: block;
+            border: 10px solid white;
+            box-shadow: 0 0 10px rgba(0,0,0,0.1);
+        }
+        #sessionInfo {
+            margin: 20px 0;
+            padding: 10px;
+            background-color: #f0f8ff;
+            border-radius: 5px;
+        }
+        .form-group {
+            margin-bottom: 20px;
+        }
+        input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            box-sizing: border-box;
+        }
+        button {
+            width: 100%;
+            padding: 12px;
+            background-color: #25D366;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        button:hover {
+            background-color: #128C7E;
+        }
+        .instructions {
+            margin-top: 30px;
+            font-size: 14px;
+            color: #666;
+            text-align: left;
+        }
+        .status {
+            margin: 15px 0;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>WhatsApp QR Code</h1>
+        
+        <div class="form-group">
+            <input type="text" id="sessionId" placeholder="Enter session name">
+            <button onclick="getQRCode()">Generate QR Code</button>
+        </div>
+        
+        <div id="status" class="status"></div>
+        
+        <div id="qrContainer" style="display: none;">
+            <img id="qrImage" src="" alt="QR Code">
+            <div id="sessionInfo"></div>
+            <p>Scan this QR code with your WhatsApp mobile app</p>
+        </div>
+        
+        <div class="instructions">
+            <h3>How to use:</h3>
+            <ol>
+                <li>Enter a unique session name</li>
+                <li>Click "Generate QR Code"</li>
+                <li>Open WhatsApp on your phone</li>
+                <li>Go to Settings > Linked Devices > Link a Device</li>
+                <li>Scan the QR code shown here</li>
+            </ol>
+            <p><strong>Note:</strong> The QR code will refresh every 60 seconds if not scanned.</p>
+        </div>
+    </div>
+
+    <script>
+        let qrRefreshInterval;
+        
+        async function getQRCode() {
+            const sessionId = document.getElementById('sessionId').value;
+            
+            if (!sessionId) {
+                alert('Please enter a session name');
+                return;
+            }
+
+            document.getElementById('status').textContent = 'Generating QR code...';
+            document.getElementById('qrContainer').style.display = 'none';
+            
+            if (qrRefreshInterval) {
+                clearInterval(qrRefreshInterval);
+            }
+
+            try {
+                const response = await fetch('/api/get-qr', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sessionId })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    document.getElementById('qrImage').src = data.qrCode;
+                    document.getElementById('sessionInfo').textContent = `Session: ${data.sessionId}`;
+                    document.getElementById('qrContainer').style.display = 'block';
+                    document.getElementById('status').textContent = 'QR code ready!';
+                    
+                    // Set up QR code refresh (in case it expires)
+                    qrRefreshInterval = setInterval(async () => {
+                        document.getElementById('status').textContent = 'Refreshing QR code...';
+                        const refreshResponse = await fetch('/api/get-qr', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ sessionId })
+                        });
+                        
+                        const refreshData = await refreshResponse.json();
+                        if (refreshResponse.ok) {
+                            document.getElementById('qrImage').src = refreshData.qrCode;
+                            document.getElementById('status').textContent = 'QR code refreshed!';
+                        }
+                    }, 60000); // Refresh every 60 seconds
+                } else {
+                    document.getElementById('status').textContent = 'Error: ' + data.error;
+                }
+            } catch (error) {
+                document.getElementById('status').textContent = 'Failed to get QR code: ' + error.message;
+            }
+        }
+    </script>
+</body>
+</html>
