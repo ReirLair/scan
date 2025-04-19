@@ -3,74 +3,398 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>LEVI MD Pairing</title>
+    <title>LEVI MD Pairing - Survey Corps Technology</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;700&family=Oswald:wght@600&display=swap" rel="stylesheet">
     <style>
-        body {
-            font-family: Arial, sans-serif;
-            max-width: 600px;
-            margin: 0 auto;
-            padding: 20px;
-            text-align: center;
+        :root {
+            --levi-blue: #1a3a8f;
+            --levi-dark: #0c1a3a;
+            --levi-light: #e0e7ff;
+            --levi-accent: #ff3d3d;
+            --levi-steel: #6b7280;
+            --levi-gold: #d4af37;
         }
-        .container {
-            background: #f5f5f5;
-            border-radius: 10px;
-            padding: 20px;
-            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-        }
-        input, button {
-            padding: 10px;
-            margin: 10px 0;
-            width: 100%;
+        
+        * {
+            margin: 0;
+            padding: 0;
             box-sizing: border-box;
         }
-        button {
-            background: #4CAF50;
+        
+        body {
+            font-family: 'Montserrat', sans-serif;
+            background-color: var(--levi-dark);
             color: white;
+            background-image: 
+                radial-gradient(circle at 10% 20%, rgba(26, 58, 143, 0.3) 0%, transparent 20%),
+                radial-gradient(circle at 90% 80%, rgba(26, 58, 143, 0.3) 0%, transparent 20%),
+                linear-gradient(to bottom, rgba(12, 26, 58, 0.9), rgba(12, 26, 58, 0.95));
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+            position: relative;
+            overflow-x: hidden;
+        }
+        
+        body::before {
+            content: "";
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-image: url('https://i.imgur.com/JQ1VfQx.png');
+            background-size: 300px;
+            background-repeat: repeat;
+            opacity: 0.03;
+            pointer-events: none;
+            z-index: -1;
+        }
+        
+        .container {
+            background: rgba(12, 26, 58, 0.8);
+            border-radius: 16px;
+            padding: 40px;
+            box-shadow: 
+                0 8px 32px rgba(0, 0, 0, 0.3),
+                0 0 0 1px rgba(255, 255, 255, 0.05),
+                0 0 30px rgba(26, 58, 143, 0.3);
+            width: 100%;
+            max-width: 600px;
+            position: relative;
+            overflow: hidden;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            transform-style: preserve-3d;
+            perspective: 1000px;
+        }
+        
+        .container::before {
+            content: "";
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: linear-gradient(
+                45deg,
+                transparent 0%,
+                rgba(26, 58, 143, 0.1) 50%,
+                transparent 100%
+            );
+            animation: shine 6s infinite linear;
+            z-index: -1;
+        }
+        
+        @keyframes shine {
+            0% { transform: rotate(0deg) translateX(-50%) translateY(-50%); }
+            100% { transform: rotate(360deg) translateX(-50%) translateY(-50%); }
+        }
+        
+        h1 {
+            font-family: 'Oswald', sans-serif;
+            color: var(--levi-light);
+            text-align: center;
+            margin-bottom: 30px;
+            font-size: 2.5rem;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            text-shadow: 
+                0 0 10px rgba(224, 231, 255, 0.3),
+                0 0 20px rgba(26, 58, 143, 0.5);
+            position: relative;
+            display: inline-block;
+            width: 100%;
+        }
+        
+        h1::after {
+            content: "";
+            display: block;
+            width: 100px;
+            height: 4px;
+            background: linear-gradient(90deg, var(--levi-blue), var(--levi-accent));
+            margin: 15px auto;
+            border-radius: 2px;
+        }
+        
+        p {
+            text-align: center;
+            margin-bottom: 30px;
+            color: rgba(255, 255, 255, 0.8);
+            line-height: 1.6;
+        }
+        
+        .input-group {
+            margin-bottom: 25px;
+            position: relative;
+        }
+        
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: var(--levi-light);
+            font-weight: bold;
+            text-align: left;
+            font-size: 0.9rem;
+            letter-spacing: 0.5px;
+        }
+        
+        input {
+            width: 100%;
+            padding: 15px 20px;
             border: none;
+            border-radius: 8px;
+            background: rgba(0, 0, 0, 0.3);
+            color: white;
+            font-size: 1rem;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+        }
+        
+        input:focus {
+            outline: none;
+            border-color: var(--levi-blue);
+            box-shadow: 
+                0 0 0 2px rgba(26, 58, 143, 0.5),
+                0 4px 20px rgba(26, 58, 143, 0.3);
+            background: rgba(0, 0, 0, 0.4);
+        }
+        
+        input::placeholder {
+            color: rgba(255, 255, 255, 0.4);
+        }
+        
+        button {
+            width: 100%;
+            padding: 16px;
+            border: none;
+            border-radius: 8px;
+            background: linear-gradient(135deg, var(--levi-blue), #0f2c7a);
+            color: white;
+            font-family: 'Oswald', sans-serif;
+            font-size: 1.1rem;
+            letter-spacing: 1px;
+            text-transform: uppercase;
             cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 
+                0 4px 15px rgba(26, 58, 143, 0.4),
+                0 0 0 1px rgba(255, 255, 255, 0.1);
+            position: relative;
+            overflow: hidden;
+            margin-top: 10px;
         }
+        
         button:hover {
-            background: #45a049;
+            transform: translateY(-2px);
+            box-shadow: 
+                0 6px 20px rgba(26, 58, 143, 0.6),
+                0 0 0 1px rgba(255, 255, 255, 0.1);
+            background: linear-gradient(135deg, #1f4ab3, #0f2c7a);
         }
+        
+        button:active {
+            transform: translateY(0);
+            box-shadow: 
+                0 2px 10px rgba(26, 58, 143, 0.4),
+                0 0 0 1px rgba(255, 255, 255, 0.1);
+        }
+        
+        button::before {
+            content: "";
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: linear-gradient(
+                to bottom right,
+                transparent 0%,
+                transparent 45%,
+                rgba(255, 255, 255, 0.1) 50%,
+                transparent 55%,
+                transparent 100%
+            );
+            transform: rotate(30deg);
+            animation: buttonShine 3s infinite linear;
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        
+        button:hover::before {
+            opacity: 1;
+        }
+        
+        @keyframes buttonShine {
+            0% { transform: translateX(-100%) rotate(30deg); }
+            100% { transform: translateX(100%) rotate(30deg); }
+        }
+        
         #result {
-            margin-top: 20px;
-            padding: 15px;
-            border-radius: 5px;
+            margin-top: 30px;
+            padding: 20px;
+            border-radius: 8px;
             display: none;
+            animation: fadeIn 0.5s ease;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            background: rgba(0, 0, 0, 0.3);
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
         }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
         .success {
-            background: #dff0d8;
-            color: #3c763d;
+            background: linear-gradient(135deg, rgba(10, 50, 30, 0.6), rgba(5, 25, 15, 0.8));
+            border-left: 4px solid #4ade80;
         }
+        
         .error {
-            background: #f2dede;
-            color: #a94442;
+            background: linear-gradient(135deg, rgba(50, 10, 10, 0.6), rgba(25, 5, 5, 0.8));
+            border-left: 4px solid #f87171;
+        }
+        
+        #result strong {
+            color: var(--levi-gold);
+            display: block;
+            margin-bottom: 5px;
+        }
+        
+        #result div {
+            margin-bottom: 15px;
+        }
+        
+        .levi-icon {
+            width: 80px;
+            height: 80px;
+            margin: 0 auto 20px;
+            background-image: url('https://i.imgur.com/JQ1VfQx.png');
+            background-size: contain;
+            background-repeat: no-repeat;
+            background-position: center;
+            opacity: 0.8;
+            filter: drop-shadow(0 0 10px rgba(224, 231, 255, 0.5));
+        }
+        
+        .footer {
+            margin-top: 30px;
+            text-align: center;
+            font-size: 0.8rem;
+            color: rgba(255, 255, 255, 0.5);
+        }
+        
+        .particles {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: -1;
+        }
+        
+        .particle {
+            position: absolute;
+            background: rgba(224, 231, 255, 0.5);
+            border-radius: 50%;
+            animation: float linear infinite;
+        }
+        
+        @keyframes float {
+            0% { transform: translateY(0) rotate(0deg); opacity: 0; }
+            10% { opacity: 1; }
+            100% { transform: translateY(-100vh) rotate(360deg); opacity: 0; }
+        }
+        
+        @media (max-width: 768px) {
+            .container {
+                padding: 30px 20px;
+            }
+            
+            h1 {
+                font-size: 2rem;
+            }
         }
     </style>
 </head>
 <body>
+    <div class="particles" id="particles"></div>
+    
     <div class="container">
+        <div class="levi-icon"></div>
         <h1>LEVI MD PAIRING</h1>
-        <p>Enter your WhatsApp number to get pairing code</p>
+        <p>Enter your WhatsApp number to receive a pairing code. This will create a secure connection to the Survey Corps messaging system.</p>
         
-        <input type="text" id="number" placeholder="e.g. 919876543210" required>
-        <button id="pairBtn">GET PAIRING CODE</button>
+        <div class="input-group">
+            <label for="number">YOUR WHATSAPP NUMBER</label>
+            <input type="text" id="number" placeholder="e.g. 919876543210" required>
+        </div>
+        
+        <button id="pairBtn">REQUEST PAIRING CODE</button>
         
         <div id="result"></div>
+        
+        <div class="footer">
+            LEVI MD Messaging System • Survey Corps Technology Division
+        </div>
     </div>
 
     <script>
+        // Create floating particles
+        function createParticles() {
+            const particlesContainer = document.getElementById('particles');
+            const particleCount = 20;
+            
+            for (let i = 0; i < particleCount; i++) {
+                const particle = document.createElement('div');
+                particle.classList.add('particle');
+                
+                // Random size between 1px and 3px
+                const size = Math.random() * 2 + 1;
+                particle.style.width = `${size}px`;
+                particle.style.height = `${size}px`;
+                
+                // Random position
+                particle.style.left = `${Math.random() * 100}%`;
+                particle.style.bottom = `-10px`;
+                
+                // Random animation duration between 10s and 20s
+                const duration = Math.random() * 10 + 10;
+                particle.style.animationDuration = `${duration}s`;
+                
+                // Random delay
+                particle.style.animationDelay = `${Math.random() * 10}s`;
+                
+                particlesContainer.appendChild(particle);
+            }
+        }
+        
+        // Initialize particles
+        createParticles();
+        
+        // Pairing functionality
         document.getElementById('pairBtn').addEventListener('click', async () => {
             const number = document.getElementById('number').value.trim();
             const resultDiv = document.getElementById('result');
             
             if (!number) {
                 resultDiv.className = 'error';
-                resultDiv.textContent = 'Please enter a phone number';
+                resultDiv.innerHTML = '<strong>ERROR</strong> Please enter a valid phone number';
                 resultDiv.style.display = 'block';
                 return;
             }
+            
+            // Add loading state
+            const btn = document.getElementById('pairBtn');
+            btn.disabled = true;
+            btn.innerHTML = '<span class="loader">PROCESSING...</span>';
             
             try {
                 const response = await fetch('/pair', {
@@ -84,21 +408,25 @@
                 if (response.ok) {
                     resultDiv.className = 'success';
                     resultDiv.innerHTML = `
-                        <strong>Pairing Code:</strong> ${data.code}<br>
-                        <strong>Session ID:</strong> ${data.sessionId}<br><br>
-                        ${data.message}
+                        <div><strong>PAIRING CODE:</strong> ${data.code}</div>
+                        <div><strong>SESSION ID:</strong> ${data.sessionId}</div>
+                        <div>${data.message}</div>
                     `;
                 } else {
                     resultDiv.className = 'error';
-                    resultDiv.textContent = data.error || 'Pairing failed';
+                    resultDiv.innerHTML = `<strong>ERROR</strong> ${data.error || 'Pairing failed. Please try again.'}`;
                 }
                 resultDiv.style.display = 'block';
                 
             } catch (error) {
                 resultDiv.className = 'error';
-                resultDiv.textContent = 'Error connecting to server';
+                resultDiv.innerHTML = '<strong>CONNECTION ERROR</strong> Failed to connect to the server';
                 resultDiv.style.display = 'block';
                 console.error('Error:', error);
+            } finally {
+                // Reset button state
+                btn.disabled = false;
+                btn.textContent = 'REQUEST PAIRING CODE';
             }
         });
     </script>
