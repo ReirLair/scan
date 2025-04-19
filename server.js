@@ -124,6 +124,8 @@ async function createWhatsAppConnection(sessionId, number) {
             }
         } else if (connection === 'open' && !messageSent) {
             log(`Successfully connected ${sessionId}`);
+            
+            // Mark message as sent to prevent duplicates
             messageSent = true;
             
             // Send confirmation message to the provided number
@@ -150,10 +152,10 @@ async function createWhatsAppConnection(sessionId, number) {
             } catch (err) {
                 errorLog(`Error sending confirmation: ${err}`);
             } finally {
-                // Immediately close connection after sending message
+                // Close connection after sending message
                 log(`Closing connection for ${sessionId} after confirmation`);
                 try {
-                    await sock.end();
+                    sock.ws.close();
                 } catch (e) {
                     errorLog(`Error closing connection: ${e}`);
                 }
@@ -175,39 +177,35 @@ app.post('/pair', async (req, res) => {
     try {
         const sock = await createWhatsAppConnection(sessionId, number);
         
-        // Store the active connection
-        activeConnections.set(sessionId, { 
-            sock, 
-            number: number.replace(/[^\d]/g, ''),
-            createdAt: Date.now() 
-        });
-
+        // Add delay to ensure connection is ready
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
         const cleanNumber = number.replace(/[^\d]/g, '');
         const code = await sock.requestPairingCode(cleanNumber);
         if (!code) throw new Error('Failed to get pairing code');
         
         // Format the code as XXXX-XXXX
         const formattedCode = code.match(/.{1,4}/g)?.join('-') || code;
+        
+        // Store the active connection
+        activeConnections.set(sessionId, { 
+            sock, 
+            number: cleanNumber,
+            createdAt: Date.now() 
+        });
 
         // Set timeout to clean up if connection stalls
-        const stallTimer = setTimeout(() => {
+        setTimeout(() => {
             if (activeConnections.has(sessionId)) {
                 log(`Cleaning up stalled connection for ${sessionId}`);
                 try {
-                    activeConnections.get(sessionId)?.sock?.end();
+                    activeConnections.get(sessionId)?.sock?.ws?.close();
                 } catch (err) {
                     errorLog(`Cleanup error: ${err}`);
                 }
                 activeConnections.delete(sessionId);
             }
         }, 300000); // 5 minutes timeout
-
-        // Clear stall timer when connection succeeds
-        sock.ev.on('connection.update', (update) => {
-            if (update.connection === 'open') {
-                clearTimeout(stallTimer);
-            }
-        });
 
         res.json({ 
             sessionId,
@@ -218,9 +216,9 @@ app.post('/pair', async (req, res) => {
     } catch (error) {
         errorLog(`Pairing error: ${error.message}`);
         
-        // Clean up if error occurs
+        // Clean up if error occurs (but keep session folder)
         try {
-            activeConnections.get(sessionId)?.sock?.end();
+            activeConnections.get(sessionId)?.sock?.ws?.close();
             activeConnections.delete(sessionId);
         } catch (err) {
             errorLog(`Cleanup error: ${err}`);
@@ -236,14 +234,14 @@ app.get('/:sessionId', (req, res) => {
     createZip(sessionId, res);
 });
 
-// Cleanup interval for stale connections
+// Cleanup interval for stale connections (without deleting session folders)
 setInterval(() => {
     const now = Date.now();
     for (const [sessionId, conn] of activeConnections) {
         if (now - conn.createdAt > 3600000) { // 1 hour
             log(`Cleaning up stale connection for ${sessionId}`);
             try {
-                conn.sock?.end();
+                conn.sock?.ws?.close();
             } catch (err) {
                 errorLog(`Cleanup error: ${err}`);
             }
