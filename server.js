@@ -68,21 +68,24 @@ app.post('/api/get-pairing-code', async (req, res) => {
 
     cleanupConnection(sessionId);
 
+    // Response tracker to prevent multiple responses
+    let responded = false;
+    const sendResponse = (status, data) => {
+        if (!responded) {
+            responded = true;
+            return res.status(status).json(data);
+        }
+    };
+
     try {
         const { state, saveCreds } = await useMultiFileAuthState(path.join(sessionDir, sessionId));
         const sock = await createSocket(state, saveCreds);
         const formattedNumber = phoneNumber.replace(/[^\d]/g, '');
         const userJid = `${formattedNumber}@s.whatsapp.net`;
 
-        let responded = false;
-        let connectionEstablished = false;
-
         const timer = setTimeout(() => {
-            if (!responded) {
-                cleanupConnection(sessionId);
-                responded = true;
-                return res.status(408).json({ error: 'Pairing timed out. Try again.' });
-            }
+            sendResponse(408, { error: 'Pairing timed out. Try again.' });
+            cleanupConnection(sessionId);
         }, 90000);
 
         connectionManager.set(sessionId, { sock, timer });
@@ -114,24 +117,20 @@ app.post('/api/get-pairing-code', async (req, res) => {
             const { connection, lastDisconnect } = update;
 
             if (connection === 'open') {
-                connectionEstablished = true;
                 clearTimeout(timer);
-                if (!responded) {
-                    responded = true;
-                    const sessionString = Buffer.from(JSON.stringify(sock.authState.creds)).toString('base64');
-                    try {
-                        await sock.sendMessage(userJid, {
-                            text: `✅ WhatsApp connected!\nSession ID: ${sessionId}\nSession String:\n${sessionString}`
-                        });
-                    } catch (err) {
-                        console.error('Error sending connection message:', err);
-                    }
-                    return res.json({
-                        sessionId,
-                        pairingCode: formattedCode,
-                        message: 'Successfully connected and paired.'
+                const sessionString = Buffer.from(JSON.stringify(sock.authState.creds)).toString('base64');
+                try {
+                    await sock.sendMessage(userJid, {
+                        text: `✅ WhatsApp connected!\nSession ID: ${sessionId}\nSession String:\n${sessionString}`
                     });
+                } catch (err) {
+                    console.error('Error sending connection message:', err);
                 }
+                sendResponse(200, {
+                    sessionId,
+                    pairingCode: formattedCode,
+                    message: 'Successfully connected and paired.'
+                });
                 await delay(1000);
                 sock.end();
                 connectionManager.delete(sessionId);
@@ -139,29 +138,24 @@ app.post('/api/get-pairing-code', async (req, res) => {
 
             if (connection === 'close') {
                 clearTimeout(timer);
-                connectionManager.delete(sessionId);
-                if (!responded) {
-                    const reason = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.reason;
-                    responded = true;
-                    if (reason === DisconnectReason.connectionLost) {
-                        return res.status(500).json({ error: 'Connection lost. Please try again.' });
-                    } else if (reason === DisconnectReason.restartRequired) {
-                        return res.status(500).json({ error: 'Session expired. Please generate a new pairing code.' });
-                    } else {
-                        return res.status(500).json({ error: 'Disconnected during pairing. Try again.' });
-                    }
+                const reason = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.reason;
+                if (reason === DisconnectReason.connectionLost) {
+                    sendResponse(500, { error: 'Connection lost. Please try again.' });
+                } else if (reason === DisconnectReason.restartRequired) {
+                    sendResponse(500, { error: 'Session expired. Please generate a new pairing code.' });
+                } else {
+                    sendResponse(500, { error: 'Disconnected during pairing. Try again.' });
                 }
+                connectionManager.delete(sessionId);
             }
         });
 
-        // If we got a code but haven't responded yet
-        if (!responded) {
-            res.json({
-                sessionId,
-                pairingCode: formattedCode,
-                message: 'Pairing code generated. Scan within 90 seconds.'
-            });
-        }
+        // Initial response with the pairing code
+        sendResponse(200, {
+            sessionId,
+            pairingCode: formattedCode,
+            message: 'Pairing code generated. Scan within 90 seconds.'
+        });
 
     } catch (err) {
         cleanupConnection(sessionId);
@@ -177,7 +171,7 @@ app.post('/api/get-pairing-code', async (req, res) => {
             userMessage = 'Failed after multiple attempts. Please try again.';
         }
         
-        return res.status(500).json({ error: userMessage });
+        sendResponse(500, { error: userMessage });
     }
 });
 
@@ -191,21 +185,24 @@ app.post('/api/get-qr', async (req, res) => {
 
     cleanupConnection(sessionId);
 
+    // Response tracker to prevent multiple responses
+    let responded = false;
+    const sendResponse = (status, data) => {
+        if (!responded) {
+            responded = true;
+            return res.status(status).json(data);
+        }
+    };
+
     try {
         const { state, saveCreds } = await useMultiFileAuthState(path.join(sessionDir, sessionId));
         const sock = await createSocket(state, saveCreds);
         const targetNumber = phoneNumber?.replace(/[^\d]/g, '');
         const userJid = targetNumber ? `${targetNumber}@s.whatsapp.net` : null;
 
-        let responded = false;
-        let connectionEstablished = false;
-
         const timer = setTimeout(() => {
-            if (!responded) {
-                cleanupConnection(sessionId);
-                responded = true;
-                return res.status(408).json({ error: 'QR code expired. Try again.' });
-            }
+            sendResponse(408, { error: 'QR code expired. Try again.' });
+            cleanupConnection(sessionId);
         }, 90000);
 
         connectionManager.set(sessionId, { sock, timer });
@@ -217,43 +214,33 @@ app.post('/api/get-qr', async (req, res) => {
             if (qr && !responded) {
                 try {
                     const url = await qrcode.toDataURL(qr);
-                    if (!responded) {
-                        responded = true;
-                        return res.json({
-                            sessionId,
-                            qrCode: url,
-                            message: 'QR code generated. Scan within 90 seconds.'
-                        });
-                    }
+                    sendResponse(200, {
+                        sessionId,
+                        qrCode: url,
+                        message: 'QR code generated. Scan within 90 seconds.'
+                    });
                 } catch (err) {
                     console.error('QR generation error:', err);
-                    if (!responded) {
-                        responded = true;
-                        return res.status(500).json({ error: 'Failed to generate QR code.' });
-                    }
+                    sendResponse(500, { error: 'Failed to generate QR code.' });
                 }
             }
 
             if (connection === 'open') {
-                connectionEstablished = true;
                 clearTimeout(timer);
-                if (!responded) {
-                    responded = true;
-                    if (userJid) {
-                        const sessionString = Buffer.from(JSON.stringify(sock.authState.creds)).toString('base64');
-                        try {
-                            await sock.sendMessage(userJid, {
-                                text: `✅ WhatsApp connected!\nSession ID: ${sessionId}\nSession String:\n${sessionString}`
-                            });
-                        } catch (err) {
-                            console.error('Error sending connection message:', err);
-                        }
+                if (userJid) {
+                    const sessionString = Buffer.from(JSON.stringify(sock.authState.creds)).toString('base64');
+                    try {
+                        await sock.sendMessage(userJid, {
+                            text: `✅ WhatsApp connected!\nSession ID: ${sessionId}\nSession String:\n${sessionString}`
+                        });
+                    } catch (err) {
+                        console.error('Error sending connection message:', err);
                     }
-                    return res.json({
-                        sessionId,
-                        message: 'Successfully connected via QR code.'
-                    });
                 }
+                sendResponse(200, {
+                    sessionId,
+                    message: 'Successfully connected via QR code.'
+                });
                 await delay(1000);
                 sock.end();
                 connectionManager.delete(sessionId);
@@ -261,24 +248,21 @@ app.post('/api/get-qr', async (req, res) => {
 
             if (connection === 'close') {
                 clearTimeout(timer);
-                connectionManager.delete(sessionId);
                 const reason = lastDisconnect?.error?.output?.statusCode || lastDisconnect?.reason;
-                if (!responded) {
-                    responded = true;
-                    if (reason === DisconnectReason.connectionLost) {
-                        return res.status(500).json({ error: 'Connection lost. Please try again.' });
-                    } else if (reason === DisconnectReason.restartRequired) {
-                        return res.status(500).json({ error: 'Session expired. Please scan a new QR code.' });
-                    } else {
-                        return res.status(500).json({ error: 'Disconnected during QR scan. Try again.' });
-                    }
+                if (reason === DisconnectReason.connectionLost) {
+                    sendResponse(500, { error: 'Connection lost. Please try again.' });
+                } else if (reason === DisconnectReason.restartRequired) {
+                    sendResponse(500, { error: 'Session expired. Please scan a new QR code.' });
+                } else {
+                    sendResponse(500, { error: 'Disconnected during QR scan. Try again.' });
                 }
+                connectionManager.delete(sessionId);
             }
         });
     } catch (err) {
         cleanupConnection(sessionId);
         console.error('QR session error:', err);
-        res.status(500).json({ error: err.message });
+        sendResponse(500, { error: err.message });
     }
 });
 
