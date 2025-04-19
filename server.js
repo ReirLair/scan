@@ -34,6 +34,17 @@ const validatePhoneNumber = (number) => {
     return cleaned.length >= 10 && cleaned.length <= 15;
 };
 
+// Custom logger implementation
+const createLogger = (level = 'error') => ({
+    level,
+    trace: () => {},
+    debug: (...args) => level === 'debug' && console.debug('[DEBUG]', ...args),
+    info: (...args) => (level === 'debug' || level === 'info') && console.log('[INFO]', ...args),
+    warn: (...args) => (level === 'debug' || level === 'info' || level === 'warn') && console.warn('[WARN]', ...args),
+    error: (...args) => console.error('[ERROR]', ...args),
+    fatal: (...args) => console.error('[FATAL]', ...args)
+});
+
 // HTML Routes
 app.get('/', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
@@ -60,7 +71,8 @@ app.post('/api/generate-session', async (req, res) => {
             auth: state,
             printQRInTerminal: false,
             browser: Browsers.ubuntu('Chrome'),
-            connectTimeoutMs: 60000
+            connectTimeoutMs: 60000,
+            logger: createLogger('error')
         });
 
         sock.ev.on('creds.update', saveCreds);
@@ -112,7 +124,7 @@ app.post('/api/get-pairing-code', async (req, res) => {
             browser: Browsers.ubuntu('Chrome'),
             getMessage: async () => ({}),
             connectTimeoutMs: 60000,
-            logger: { level: 'debug' } // Enable debug logging
+            logger: createLogger('debug')
         });
 
         const formattedNumber = phoneNumber.replace(/[^\d]/g, '');
@@ -236,7 +248,7 @@ app.post('/api/get-qr', async (req, res) => {
             browser: Browsers.ubuntu('Chrome'),
             getMessage: async () => ({}),
             connectTimeoutMs: 60000,
-            logger: { level: 'debug' } // Enable debug logging
+            logger: createLogger('debug')
         });
 
         const targetNumber = phoneNumber ? phoneNumber.replace(/[^\d]/g, '') : null;
