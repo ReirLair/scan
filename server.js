@@ -4,11 +4,12 @@ const path = require('path');
 const archiver = require('archiver');
 const Pino = require('pino');
 const { 
-    ToxxicTechConnect, 
+    default: makeWASocket, 
     useMultiFileAuthState, 
     DisconnectReason,
     makeInMemoryStore,
-    BufferJSON
+    BufferJSON,
+    Browsers
 } = require('@whiskeysockets/baileys');
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -72,7 +73,7 @@ async function createWhatsAppConnection(sessionId, number) {
     const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
     const store = makeInMemoryStore({ logger: Pino().child({ level: 'silent', stream: 'store' }) });
     
-    const sock = ToxxicTechConnect({
+    const sock = makeWASocket({
         logger: Pino({ level: 'silent' }),
         printQRInTerminal: false,
         auth: state,
@@ -84,7 +85,7 @@ async function createWhatsAppConnection(sessionId, number) {
         generateHighQualityLinkPreview: true,
         syncFullHistory: true,
         markOnlineOnConnect: true,
-        browser: ['Ubuntu', 'Chrome', '20.0.04'],
+        browser: Browsers.ubuntu('Chrome'),
         getMessage: async () => ({}),
     });
 
@@ -106,23 +107,32 @@ async function createWhatsAppConnection(sessionId, number) {
             } else {
                 // Clean up if not reconnecting
                 activeConnections.delete(sessionId);
+                try {
+                    fs.rmSync(sessionPath, { recursive: true });
+                } catch (err) {
+                    errorLog(`Error cleaning up session: ${err}`);
+                }
             }
         } else if (connection === 'open') {
             log(`Successfully connected ${sessionId}`);
             
             // Send confirmation message
-            const [jid] = Object.keys(sock.user?.contacts || {});
-            if (jid) {
-                await sock.sendMessage(jid, { 
-                    text: `LEVI MD PAIR CONNECTED USE ABOVE SESSION ID\n\n${sessionId.toUpperCase()}`
-                });
-                
-                // Close connection after sending message
-                setTimeout(() => {
-                    log(`Closing connection for ${sessionId} after confirmation`);
-                    sock.ws.close();
-                    activeConnections.delete(sessionId);
-                }, 5000);
+            try {
+                const [jid] = Object.keys(sock.user?.contacts || {});
+                if (jid) {
+                    await sock.sendMessage(jid, { 
+                        text: `LEVI MD PAIR CONNECTED USE ABOVE SESSION ID\n\n${sessionId.toUpperCase()}`
+                    });
+                    
+                    // Close connection after sending message
+                    setTimeout(() => {
+                        log(`Closing connection for ${sessionId} after confirmation`);
+                        sock.ws.close();
+                        activeConnections.delete(sessionId);
+                    }, 5000);
+                }
+            } catch (err) {
+                errorLog(`Error sending confirmation: ${err}`);
             }
         }
     });
@@ -168,7 +178,15 @@ app.post('/pair', async (req, res) => {
         setTimeout(() => {
             if (activeConnections.has(sessionId)) {
                 log(`Cleaning up stalled connection for ${sessionId}`);
-                activeConnections.get(sessionId)?.sock?.ws?.close();
+                try {
+                    activeConnections.get(sessionId)?.sock?.ws?.close();
+                    const sessionPath = path.join(sessionsDir, sessionId);
+                    if (fs.existsSync(sessionPath)) {
+                        fs.rmSync(sessionPath, { recursive: true });
+                    }
+                } catch (err) {
+                    errorLog(`Cleanup error: ${err}`);
+                }
                 activeConnections.delete(sessionId);
             }
         }, 300000); // 5 minutes timeout
@@ -184,11 +202,15 @@ app.post('/pair', async (req, res) => {
         
         // Clean up if error occurs
         const sessionPath = path.join(sessionsDir, sessionId);
-        if (fs.existsSync(sessionPath)) {
-            fs.rmSync(sessionPath, { recursive: true });
+        try {
+            if (fs.existsSync(sessionPath)) {
+                fs.rmSync(sessionPath, { recursive: true });
+            }
+            activeConnections.get(sessionId)?.sock?.ws?.close();
+            activeConnections.delete(sessionId);
+        } catch (err) {
+            errorLog(`Cleanup error: ${err}`);
         }
-        activeConnections.get(sessionId)?.sock?.ws?.close();
-        activeConnections.delete(sessionId);
         
         res.status(500).json({ error: error.message });
     }
@@ -212,7 +234,15 @@ setInterval(() => {
     for (const [sessionId, conn] of activeConnections) {
         if (now - conn.createdAt > 3600000) { // 1 hour
             log(`Cleaning up stale connection for ${sessionId}`);
-            conn.sock?.ws?.close();
+            try {
+                conn.sock?.ws?.close();
+                const sessionPath = path.join(sessionsDir, sessionId);
+                if (fs.existsSync(sessionPath)) {
+                    fs.rmSync(sessionPath, { recursive: true });
+                }
+            } catch (err) {
+                errorLog(`Cleanup error: ${err}`);
+            }
             activeConnections.delete(sessionId);
         }
     }
