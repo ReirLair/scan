@@ -9,7 +9,7 @@ const {
     DisconnectReason,
     makeInMemoryStore,
     BufferJSON,
-    delay
+    jidNormalizedUser
 } = require('@whiskeysockets/baileys');
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -19,9 +19,13 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static('public'));
 
-// Logger function for consistent console output
-const log = (message) => console.log(`[LEVI-MD] → ${message}`);
-const errorLog = (message) => console.error(`[LEVI-MD] → ❌ ${message}`);
+// Enhanced logger with colors and timestamps
+const log = (message) => {
+    console.log(`\x1b[36m[${new Date().toISOString()}]\x1b[0m \x1b[32m[LEVI-MD]\x1b[0m → ${message}`);
+};
+const errorLog = (message) => {
+    console.error(`\x1b[36m[${new Date().toISOString()}]\x1b[0m \x1b[31m[LEVI-MD]\x1b[0m → ❌ ${message}`);
+};
 
 // Session storage
 const sessionsDir = path.join(__dirname, 'sessions');
@@ -48,6 +52,10 @@ function createZip(sessionId, res) {
     const sessionPath = path.join(sessionsDir, sessionId);
     const zipPath = path.join(sessionsDir, `${sessionId}.zip`);
     
+    if (!fs.existsSync(sessionPath)) {
+        return res.status(404).send('Session not found');
+    }
+
     const output = fs.createWriteStream(zipPath);
     const archive = archiver('zip', { zlib: { level: 9 } });
     
@@ -71,7 +79,9 @@ function createZip(sessionId, res) {
 // Initialize WhatsApp connection
 async function createWhatsAppConnection(sessionId, number) {
     const sessionPath = path.join(sessionsDir, sessionId);
-    fs.mkdirSync(sessionPath, { recursive: true });
+    if (!fs.existsSync(sessionPath)) {
+        fs.mkdirSync(sessionPath, { recursive: true });
+    }
 
     const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
     
@@ -108,36 +118,38 @@ async function createWhatsAppConnection(sessionId, number) {
                 setTimeout(() => createWhatsAppConnection(sessionId, number), 2000);
             } else {
                 activeConnections.delete(sessionId);
-                try {
-                    fs.rmSync(sessionPath, { recursive: true });
-                } catch (err) {
-                    errorLog(`Error cleaning up session: ${err}`);
-                }
+                // Don't delete session folder here - let it persist
             }
         } else if (connection === 'open') {
             log(`Successfully connected ${sessionId}`);
             
+            // Send confirmation message to the provided number
             try {
-                // Format the number to JID
-                const formattedNumber = number.replace(/[^\d]/g, '');
-                const jid = `${formattedNumber}@s.whatsapp.net`;
-                
-                // Wait briefly to ensure connection is fully ready
-                await delay(2000);
-                
-                // Send confirmation message directly to the provided number
-                await sock.sendMessage(jid, { 
-                    text: `LEVI MD PAIR CONNECTED USE ABOVE SESSION ID\n\n${sessionId.toUpperCase()}`
-                });
-                
-                log(`Confirmation sent to ${jid}`);
+                const normalizedJid = jidNormalizedUser(number);
+                if (normalizedJid) {
+                    const beautifulMessage = {
+                        text: `✨ *LEVI MD CONNECTION SUCCESSFUL* ✨\n\n` +
+                              `✅ Your session is now ready to use!\n\n` +
+                              `🔑 *Session ID:* ${sessionId.toUpperCase()}\n` +
+                              `📅 *Created at:* ${new Date().toLocaleString()}\n\n` +
+                              `_Keep this ID safe for future reference_`,
+                        contextInfo: {
+                            forwardingScore: 999,
+                            isForwarded: true
+                        }
+                    };
+                    
+                    await sock.sendMessage(normalizedJid, beautifulMessage);
+                    
+                    // Close connection after sending message
+                    setTimeout(() => {
+                        log(`Closing connection for ${sessionId} after confirmation`);
+                        sock.ws.close();
+                        activeConnections.delete(sessionId);
+                    }, 5000);
+                }
             } catch (err) {
-                errorLog(`Error sending confirmation: ${err.message}`);
-            } finally {
-                // Close connection after sending message
-                log(`Closing connection for ${sessionId}`);
-                sock.ws.close();
-                activeConnections.delete(sessionId);
+                errorLog(`Error sending confirmation: ${err}`);
             }
         }
     });
@@ -145,7 +157,7 @@ async function createWhatsAppConnection(sessionId, number) {
     return sock;
 }
 
-// Pairing endpoint - now allows multiple sessions with same number
+// Pairing endpoint
 app.post('/pair', async (req, res) => {
     const { number } = req.body;
     if (!number) return res.status(400).json({ error: 'Phone number required' });
@@ -155,6 +167,15 @@ app.post('/pair', async (req, res) => {
     try {
         const sock = await createWhatsAppConnection(sessionId, number);
         
+        // Add delay to ensure connection is ready
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+        const code = await sock.requestPairingCode(number.replace(/[^\d]/g, ''));
+        if (!code) throw new Error('Failed to get pairing code');
+        
+        // Format the code as XXXX-XXXX
+        const formattedCode = code.match(/.{1,4}/g)?.join('-') || code;
+        
         // Store the active connection
         activeConnections.set(sessionId, { 
             sock, 
@@ -162,25 +183,12 @@ app.post('/pair', async (req, res) => {
             createdAt: Date.now() 
         });
 
-        // Add delay to ensure connection is ready
-        await delay(2000);
-        
-        const code = await sock.requestPairingCode(number.replace(/[^\d]/g, ''));
-        if (!code) throw new Error('Failed to get pairing code');
-        
-        // Format the code as XXXX-XXXX
-        const formattedCode = code.match(/.{1,4}/g)?.join('-') || code;
-
         // Set timeout to clean up if connection stalls
         setTimeout(() => {
             if (activeConnections.has(sessionId)) {
                 log(`Cleaning up stalled connection for ${sessionId}`);
                 try {
                     activeConnections.get(sessionId)?.sock?.ws?.close();
-                    const sessionPath = path.join(sessionsDir, sessionId);
-                    if (fs.existsSync(sessionPath)) {
-                        fs.rmSync(sessionPath, { recursive: true });
-                    }
                 } catch (err) {
                     errorLog(`Cleanup error: ${err}`);
                 }
@@ -197,12 +205,8 @@ app.post('/pair', async (req, res) => {
     } catch (error) {
         errorLog(`Pairing error: ${error.message}`);
         
-        // Clean up if error occurs
-        const sessionPath = path.join(sessionsDir, sessionId);
+        // Clean up if error occurs (but keep session folder)
         try {
-            if (fs.existsSync(sessionPath)) {
-                fs.rmSync(sessionPath, { recursive: true });
-            }
             activeConnections.get(sessionId)?.sock?.ws?.close();
             activeConnections.delete(sessionId);
         } catch (err) {
@@ -216,16 +220,10 @@ app.post('/pair', async (req, res) => {
 // Download endpoint
 app.get('/:sessionId', (req, res) => {
     const { sessionId } = req.params;
-    const sessionPath = path.join(sessionsDir, sessionId);
-    
-    if (!fs.existsSync(sessionPath)) {
-        return res.status(404).send('Session not found');
-    }
-    
     createZip(sessionId, res);
 });
 
-// Cleanup interval for stale connections
+// Cleanup interval for stale connections (without deleting session folders)
 setInterval(() => {
     const now = Date.now();
     for (const [sessionId, conn] of activeConnections) {
@@ -233,10 +231,6 @@ setInterval(() => {
             log(`Cleaning up stale connection for ${sessionId}`);
             try {
                 conn.sock?.ws?.close();
-                const sessionPath = path.join(sessionsDir, sessionId);
-                if (fs.existsSync(sessionPath)) {
-                    fs.rmSync(sessionPath, { recursive: true });
-                }
             } catch (err) {
                 errorLog(`Cleanup error: ${err}`);
             }
