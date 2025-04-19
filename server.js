@@ -59,23 +59,47 @@ app.post('/api/generate-session', async (req, res) => {
         const sock = makeWASocket({
             auth: state,
             printQRInTerminal: false,
-            browser: Browsers.ubuntu('Chrome')
+            browser: Browsers.ubuntu('Chrome'),
+            logger: { level: 'silent' }
         });
 
         sock.ev.on('creds.update', saveCreds);
-        sock.ev.on('connection.update', (update) => {
-            if (update.connection === 'open') {
-                const sessionString = Buffer.from(JSON.stringify(sock.authState.creds)).toString('base64');
-                res.json({ 
-                    sessionId,
-                    sessionString,
-                    message: 'Session generated successfully'
-                });
+        
+        // Wait for connection to open
+        const waitForConnection = new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => {
                 sock.end();
-            }
+                reject(new Error('Connection timeout'));
+            }, 30000);
+
+            sock.ev.on('connection.update', (update) => {
+                if (update.connection === 'open') {
+                    clearTimeout(timeout);
+                    resolve();
+                } else if (update.connection === 'close') {
+                    clearTimeout(timeout);
+                    reject(new Error('Connection closed'));
+                }
+            });
         });
+
+        await waitForConnection;
+        
+        const sessionString = Buffer.from(JSON.stringify(sock.authState.creds)).toString('base64');
+        sock.end();
+        
+        res.json({ 
+            sessionId,
+            sessionString,
+            message: 'Session generated successfully'
+        });
+
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        console.error('Session generation error:', error);
+        res.status(500).json({ 
+            error: 'Failed to generate session',
+            details: error.message 
+        });
     }
 });
 
@@ -131,12 +155,21 @@ app.post('/api/get-pairing-code', async (req, res) => {
         
         // Generate pairing code with retry logic
         let code;
-        try {
-            code = await sock.requestPairingCode(formattedNumber);
-        } catch (codeError) {
-            console.error('First pairing code attempt failed, retrying...', codeError);
-            await delay(2000);
-            code = await sock.requestPairingCode(formattedNumber);
+        let attempts = 0;
+        const maxAttempts = 3;
+        
+        while (attempts < maxAttempts) {
+            try {
+                code = await sock.requestPairingCode(formattedNumber);
+                break;
+            } catch (codeError) {
+                attempts++;
+                console.error(`Pairing code attempt ${attempts} failed:`, codeError);
+                if (attempts >= maxAttempts) {
+                    throw codeError;
+                }
+                await delay(2000 * attempts); // Exponential backoff
+            }
         }
 
         const formattedCode = code.match(/.{1,4}/g)?.join('-') || code;
@@ -182,110 +215,6 @@ app.post('/api/get-pairing-code', async (req, res) => {
         }
         res.status(500).json({ 
             error: 'Failed to generate pairing code. Please try again.',
-            details: error.message 
-        });
-    }
-});
-
-app.post('/api/get-qr', async (req, res) => {
-    const { sessionId, phoneNumber } = req.body;
-    
-    if (!sessionId) {
-        return res.status(400).json({ error: 'Session ID is required' });
-    }
-
-    if (phoneNumber && !validatePhoneNumber(phoneNumber)) {
-        return res.status(400).json({ error: 'Invalid phone number format. Use format like 2347087243475' });
-    }
-
-    // Clean up any existing connection for this session
-    if (connectionManager.has(sessionId)) {
-        const existing = connectionManager.get(sessionId);
-        existing.sock.end();
-        clearTimeout(existing.timer);
-        connectionManager.delete(sessionId);
-    }
-
-    try {
-        const { state, saveCreds } = await useMultiFileAuthState(path.join(sessionDir, sessionId));
-        const sock = makeWASocket({
-            auth: state,
-            printQRInTerminal: false,
-            browser: Browsers.ubuntu('Chrome'),
-            getMessage: async () => ({}),
-            connectTimeoutMs: 60000,
-            keepAliveIntervalMs: 20000,
-            logger: { level: 'silent' }
-        });
-
-        const targetNumber = phoneNumber ? phoneNumber.replace(/[^\d]/g, '') : null;
-        const userJid = targetNumber ? `${targetNumber}@s.whatsapp.net` : null;
-
-        // Store connection info
-        const connectionInfo = {
-            sock,
-            connected: false,
-            timer: setTimeout(() => {
-                if (!connectionInfo.connected) {
-                    sock.end();
-                    connectionManager.delete(sessionId);
-                    console.log(`QR connection timeout for session: ${sessionId}`);
-                }
-            }, 60000) // 60 second timeout
-        };
-        connectionManager.set(sessionId, connectionInfo);
-
-        sock.ev.on('creds.update', saveCreds);
-
-        // Handle connection events
-        sock.ev.on('connection.update', async (update) => {
-            const { qr, connection } = update;
-            
-            if (qr) {
-                qrcode.toDataURL(qr, (err, url) => {
-                    if (!err) {
-                        res.json({ 
-                            sessionId,
-                            qrCode: url,
-                            message: 'QR code generated successfully. Scan within 60 seconds.'
-                        });
-                    }
-                });
-            }
-
-            if (connection === 'open') {
-                connectionInfo.connected = true;
-                clearTimeout(connectionInfo.timer);
-                
-                if (userJid) {
-                    try {
-                        const sessionString = Buffer.from(JSON.stringify(sock.authState.creds)).toString('base64');
-                        await sock.sendMessage(userJid, { 
-                            text: `✅ WhatsApp connection established!\n\nYour Session ID: ${sessionId}\n\nSession String:\n${sessionString}` 
-                        });
-                    } catch (sendError) {
-                        console.error('Failed to send confirmation:', sendError);
-                    }
-                }
-                
-                await delay(1000);
-                sock.end();
-                connectionManager.delete(sessionId);
-            } else if (connection === 'close') {
-                const shouldReconnect = update.lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-                console.log(`QR Connection closed for ${sessionId}. Reconnect: ${shouldReconnect}`);
-                clearTimeout(connectionInfo.timer);
-                connectionManager.delete(sessionId);
-            }
-        });
-    } catch (error) {
-        console.error('QR generation error:', error);
-        if (connectionManager.has(sessionId)) {
-            connectionManager.get(sessionId).sock.end();
-            connectionManager.delete(sessionId);
-        }
-        res.status(500).json({ 
-            error: 'Failed to generate QR code. Please try again.',
             details: error.message 
         });
     }
