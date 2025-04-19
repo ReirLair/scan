@@ -34,13 +34,13 @@ const createSocket = async (state, saveCreds) => {
         browser: Browsers.macOS('Safari'),
         printQRInTerminal: false,
         getMessage: async () => ({}),
-        markOnlineOnConnect: true,
+        markOnlineOnConnect: false, // Changed to false to prevent premature online status
         emitOwnEvents: true,
         keepAliveIntervalMs: 30_000,
-        connectTimeoutMs: 120_000,
+        connectTimeoutMs: 180_000, // Increased timeout
         defaultQueryTimeoutMs: 90_000,
         syncFullHistory: false,
-        fireInitQueries: false, // Changed to false to prevent premature login
+        fireInitQueries: false, // Critical: Must be false for pairing
         shouldIgnoreJid: jid => false,
         linkPreviewImageThumbnailWidth: 192,
         transactionOpts: { maxCommitRetries: 10, delayBetweenTriesMs: 3000 }
@@ -87,17 +87,31 @@ app.post('/api/get-pairing-code', async (req, res) => {
         const userJid = `${formattedNumber}@s.whatsapp.net`;
 
         const timer = setTimeout(() => {
-            sendResponse(408, { error: 'Pairing timed out. Try again.' });
-            cleanupConnection(sessionId);
-        }, 120000);
+            if (!responded) {
+                sendResponse(408, { error: 'Pairing timed out. Try again.' });
+                cleanupConnection(sessionId);
+            }
+        }, 180000); // 3 minute timeout
 
         connectionManager.set(sessionId, { sock, timer });
 
         sock.ev.on('creds.update', saveCreds);
 
+        // First establish connection before requesting pairing code
+        await new Promise((resolve) => {
+            const connectionHandler = (update) => {
+                const { connection } = update;
+                if (connection === 'open') {
+                    sock.ev.off('connection.update', connectionHandler);
+                    resolve();
+                }
+            };
+            sock.ev.on('connection.update', connectionHandler);
+        });
+
         let code = null;
         let attempts = 0;
-        const maxAttempts = 5;
+        const maxAttempts = 3;
         
         // Generate pairing code with retry logic
         while (attempts < maxAttempts && !code) {
@@ -110,7 +124,7 @@ app.post('/api/get-pairing-code', async (req, res) => {
                 if (attempts >= maxAttempts) {
                     throw new Error('Failed to generate pairing code after multiple attempts. Please try again later.');
                 }
-                await delay(5000); // Increased delay between attempts
+                await delay(8000); // Longer delay between attempts
             }
         }
 
@@ -125,15 +139,15 @@ app.post('/api/get-pairing-code', async (req, res) => {
             message: 'Pairing code generated. Enter this code in your WhatsApp linked devices section.'
         });
 
-        // Connection event handlers
+        // Now wait for the actual pairing completion
         sock.ev.on('connection.update', async (update) => {
             const { connection, lastDisconnect, isNewLogin } = update;
 
             if (connection === 'open') {
                 clearTimeout(timer);
                 try {
-                    // Wait for initial sync to complete
-                    await delay(3000);
+                    // Wait for proper authentication
+                    await delay(5000);
                     
                     const sessionString = Buffer.from(JSON.stringify(sock.authState.creds)).toString('base64');
                     try {
@@ -149,11 +163,12 @@ app.post('/api/get-pairing-code', async (req, res) => {
                         sendResponse(200, {
                             sessionId,
                             message: 'Successfully connected and paired.',
-                            isNewLogin
+                            isNewLogin,
+                            sessionString
                         });
                     }
                     
-                    await delay(1000);
+                    await delay(2000);
                     sock.end();
                     connectionManager.delete(sessionId);
                 } catch (err) {
@@ -199,6 +214,8 @@ app.post('/api/get-pairing-code', async (req, res) => {
             userMessage = 'Failed after multiple attempts. Please wait a few minutes and try again.';
         } else if (errorMessage.includes('session')) {
             userMessage = 'Session error. Please start a new pairing process.';
+        } else if (errorMessage.includes('connection closed')) {
+            userMessage = 'Connection closed unexpectedly. Please try again.';
         }
         
         sendResponse(500, { 
