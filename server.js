@@ -90,13 +90,12 @@ app.post('/api/get-pairing-code', async (req, res) => {
         return res.status(400).json({ error: 'Invalid phone number format. Use format like 2347087243475' });
     }
 
-    // Check for existing connection
+    // Clean up any existing connection for this session
     if (connectionManager.has(sessionId)) {
         const existing = connectionManager.get(sessionId);
-        if (existing.connected) {
-            return res.status(400).json({ error: 'Session already connected' });
-        }
-        existing.sock.end(); // Clean up previous connection
+        existing.sock.end();
+        clearTimeout(existing.timer);
+        connectionManager.delete(sessionId);
     }
 
     try {
@@ -106,7 +105,9 @@ app.post('/api/get-pairing-code', async (req, res) => {
             printQRInTerminal: false,
             browser: Browsers.ubuntu('Chrome'),
             getMessage: async () => ({}),
-            connectTimeoutMs: 60000 // Wait up to 60 seconds for connection
+            connectTimeoutMs: 60000,
+            keepAliveIntervalMs: 20000,
+            logger: { level: 'silent' }
         });
 
         const formattedNumber = phoneNumber.replace(/[^\d]/g, '');
@@ -120,6 +121,7 @@ app.post('/api/get-pairing-code', async (req, res) => {
                 if (!connectionInfo.connected) {
                     sock.end();
                     connectionManager.delete(sessionId);
+                    console.log(`Connection timeout for session: ${sessionId}`);
                 }
             }, 60000) // 60 second timeout
         };
@@ -127,8 +129,16 @@ app.post('/api/get-pairing-code', async (req, res) => {
 
         sock.ev.on('creds.update', saveCreds);
         
-        // Generate pairing code
-        const code = await sock.requestPairingCode(formattedNumber);
+        // Generate pairing code with retry logic
+        let code;
+        try {
+            code = await sock.requestPairingCode(formattedNumber);
+        } catch (codeError) {
+            console.error('First pairing code attempt failed, retrying...', codeError);
+            await delay(2000);
+            code = await sock.requestPairingCode(formattedNumber);
+        }
+
         const formattedCode = code.match(/.{1,4}/g)?.join('-') || code;
 
         // Handle connection events
@@ -151,6 +161,8 @@ app.post('/api/get-pairing-code', async (req, res) => {
                     console.error('Failed to send confirmation:', sendError);
                 }
             } else if (update.connection === 'close') {
+                const shouldReconnect = update.lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+                console.log(`Connection closed for ${sessionId}. Reconnect: ${shouldReconnect}`);
                 clearTimeout(connectionInfo.timer);
                 connectionManager.delete(sessionId);
             }
@@ -164,7 +176,14 @@ app.post('/api/get-pairing-code', async (req, res) => {
 
     } catch (error) {
         console.error('Pairing error:', error);
-        res.status(500).json({ error: error.message });
+        if (connectionManager.has(sessionId)) {
+            connectionManager.get(sessionId).sock.end();
+            connectionManager.delete(sessionId);
+        }
+        res.status(500).json({ 
+            error: 'Failed to generate pairing code. Please try again.',
+            details: error.message 
+        });
     }
 });
 
@@ -179,13 +198,12 @@ app.post('/api/get-qr', async (req, res) => {
         return res.status(400).json({ error: 'Invalid phone number format. Use format like 2347087243475' });
     }
 
-    // Check for existing connection
+    // Clean up any existing connection for this session
     if (connectionManager.has(sessionId)) {
         const existing = connectionManager.get(sessionId);
-        if (existing.connected) {
-            return res.status(400).json({ error: 'Session already connected' });
-        }
-        existing.sock.end(); // Clean up previous connection
+        existing.sock.end();
+        clearTimeout(existing.timer);
+        connectionManager.delete(sessionId);
     }
 
     try {
@@ -195,7 +213,9 @@ app.post('/api/get-qr', async (req, res) => {
             printQRInTerminal: false,
             browser: Browsers.ubuntu('Chrome'),
             getMessage: async () => ({}),
-            connectTimeoutMs: 60000 // Wait up to 60 seconds for connection
+            connectTimeoutMs: 60000,
+            keepAliveIntervalMs: 20000,
+            logger: { level: 'silent' }
         });
 
         const targetNumber = phoneNumber ? phoneNumber.replace(/[^\d]/g, '') : null;
@@ -209,6 +229,7 @@ app.post('/api/get-qr', async (req, res) => {
                 if (!connectionInfo.connected) {
                     sock.end();
                     connectionManager.delete(sessionId);
+                    console.log(`QR connection timeout for session: ${sessionId}`);
                 }
             }, 60000) // 60 second timeout
         };
@@ -251,13 +272,22 @@ app.post('/api/get-qr', async (req, res) => {
                 sock.end();
                 connectionManager.delete(sessionId);
             } else if (connection === 'close') {
+                const shouldReconnect = update.lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
+                console.log(`QR Connection closed for ${sessionId}. Reconnect: ${shouldReconnect}`);
                 clearTimeout(connectionInfo.timer);
                 connectionManager.delete(sessionId);
             }
         });
     } catch (error) {
         console.error('QR generation error:', error);
-        res.status(500).json({ error: error.message });
+        if (connectionManager.has(sessionId)) {
+            connectionManager.get(sessionId).sock.end();
+            connectionManager.delete(sessionId);
+        }
+        res.status(500).json({ 
+            error: 'Failed to generate QR code. Please try again.',
+            details: error.message 
+        });
     }
 });
 
