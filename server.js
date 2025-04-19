@@ -60,46 +60,28 @@ app.post('/api/generate-session', async (req, res) => {
             auth: state,
             printQRInTerminal: false,
             browser: Browsers.ubuntu('Chrome'),
-            logger: { level: 'silent' }
+            connectTimeoutMs: 60000
         });
 
         sock.ev.on('creds.update', saveCreds);
-        
-        // Wait for connection to open
-        const waitForConnection = new Promise((resolve, reject) => {
-            const timeout = setTimeout(() => {
+        sock.ev.on('connection.update', (update) => {
+            if (update.connection === 'open') {
+                const sessionString = Buffer.from(JSON.stringify(sock.authState.creds)).toString('base64');
+                res.json({ 
+                    sessionId,
+                    sessionString,
+                    message: 'Session generated successfully'
+                });
                 sock.end();
-                reject(new Error('Connection timeout'));
-            }, 30000);
-
-            sock.ev.on('connection.update', (update) => {
-                if (update.connection === 'open') {
-                    clearTimeout(timeout);
-                    resolve();
-                } else if (update.connection === 'close') {
-                    clearTimeout(timeout);
-                    reject(new Error('Connection closed'));
+            } else if (update.connection === 'close') {
+                const { reason } = update.lastDisconnect || {};
+                if (reason === DisconnectReason.connectionLost) {
+                    res.status(500).json({ error: 'Connection lost. Please try again.' });
                 }
-            });
+            }
         });
-
-        await waitForConnection;
-        
-        const sessionString = Buffer.from(JSON.stringify(sock.authState.creds)).toString('base64');
-        sock.end();
-        
-        res.json({ 
-            sessionId,
-            sessionString,
-            message: 'Session generated successfully'
-        });
-
     } catch (error) {
-        console.error('Session generation error:', error);
-        res.status(500).json({ 
-            error: 'Failed to generate session',
-            details: error.message 
-        });
+        res.status(500).json({ error: error.message });
     }
 });
 
@@ -114,7 +96,7 @@ app.post('/api/get-pairing-code', async (req, res) => {
         return res.status(400).json({ error: 'Invalid phone number format. Use format like 2347087243475' });
     }
 
-    // Clean up any existing connection for this session
+    // Clean up any existing connection
     if (connectionManager.has(sessionId)) {
         const existing = connectionManager.get(sessionId);
         existing.sock.end();
@@ -130,8 +112,7 @@ app.post('/api/get-pairing-code', async (req, res) => {
             browser: Browsers.ubuntu('Chrome'),
             getMessage: async () => ({}),
             connectTimeoutMs: 60000,
-            keepAliveIntervalMs: 20000,
-            logger: { level: 'silent' }
+            logger: { level: 'debug' } // Enable debug logging
         });
 
         const formattedNumber = phoneNumber.replace(/[^\d]/g, '');
@@ -145,7 +126,7 @@ app.post('/api/get-pairing-code', async (req, res) => {
                 if (!connectionInfo.connected) {
                     sock.end();
                     connectionManager.delete(sessionId);
-                    console.log(`Connection timeout for session: ${sessionId}`);
+                    res.status(408).json({ error: 'Connection timed out. Please try again.' });
                 }
             }, 60000) // 60 second timeout
         };
@@ -155,20 +136,16 @@ app.post('/api/get-pairing-code', async (req, res) => {
         
         // Generate pairing code with retry logic
         let code;
-        let attempts = 0;
-        const maxAttempts = 3;
-        
-        while (attempts < maxAttempts) {
-            try {
+        try {
+            code = await sock.requestPairingCode(formattedNumber);
+        } catch (pairError) {
+            console.error('Pairing code request failed:', pairError);
+            if (pairError.message.includes('could not link device')) {
+                // Wait and retry once
+                await delay(2000);
                 code = await sock.requestPairingCode(formattedNumber);
-                break;
-            } catch (codeError) {
-                attempts++;
-                console.error(`Pairing code attempt ${attempts} failed:`, codeError);
-                if (attempts >= maxAttempts) {
-                    throw codeError;
-                }
-                await delay(2000 * attempts); // Exponential backoff
+            } else {
+                throw pairError;
             }
         }
 
@@ -176,7 +153,9 @@ app.post('/api/get-pairing-code', async (req, res) => {
 
         // Handle connection events
         sock.ev.on('connection.update', async (update) => {
-            if (update.connection === 'open') {
+            const { connection, lastDisconnect } = update;
+            
+            if (connection === 'open') {
                 connectionInfo.connected = true;
                 clearTimeout(connectionInfo.timer);
                 
@@ -193,11 +172,14 @@ app.post('/api/get-pairing-code', async (req, res) => {
                 } catch (sendError) {
                     console.error('Failed to send confirmation:', sendError);
                 }
-            } else if (update.connection === 'close') {
-                const shouldReconnect = update.lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-                console.log(`Connection closed for ${sessionId}. Reconnect: ${shouldReconnect}`);
+            } else if (connection === 'close') {
                 clearTimeout(connectionInfo.timer);
                 connectionManager.delete(sessionId);
+                
+                const { reason } = lastDisconnect || {};
+                if (reason === DisconnectReason.connectionLost) {
+                    res.status(500).json({ error: 'Connection lost. Please try again.' });
+                }
             }
         });
 
@@ -209,14 +191,129 @@ app.post('/api/get-pairing-code', async (req, res) => {
 
     } catch (error) {
         console.error('Pairing error:', error);
+        
+        // Clean up on error
         if (connectionManager.has(sessionId)) {
-            connectionManager.get(sessionId).sock.end();
+            const existing = connectionManager.get(sessionId);
+            existing.sock.end();
+            clearTimeout(existing.timer);
             connectionManager.delete(sessionId);
         }
-        res.status(500).json({ 
-            error: 'Failed to generate pairing code. Please try again.',
-            details: error.message 
+        
+        let errorMessage = error.message;
+        if (error.message.includes('could not link device')) {
+            errorMessage = 'Device linking failed. Please try again or use QR code method.';
+        }
+        
+        res.status(500).json({ error: errorMessage });
+    }
+});
+
+app.post('/api/get-qr', async (req, res) => {
+    const { sessionId, phoneNumber } = req.body;
+    
+    if (!sessionId) {
+        return res.status(400).json({ error: 'Session ID is required' });
+    }
+
+    if (phoneNumber && !validatePhoneNumber(phoneNumber)) {
+        return res.status(400).json({ error: 'Invalid phone number format. Use format like 2347087243475' });
+    }
+
+    // Clean up any existing connection
+    if (connectionManager.has(sessionId)) {
+        const existing = connectionManager.get(sessionId);
+        existing.sock.end();
+        clearTimeout(existing.timer);
+        connectionManager.delete(sessionId);
+    }
+
+    try {
+        const { state, saveCreds } = await useMultiFileAuthState(path.join(sessionDir, sessionId));
+        const sock = makeWASocket({
+            auth: state,
+            printQRInTerminal: false,
+            browser: Browsers.ubuntu('Chrome'),
+            getMessage: async () => ({}),
+            connectTimeoutMs: 60000,
+            logger: { level: 'debug' } // Enable debug logging
         });
+
+        const targetNumber = phoneNumber ? phoneNumber.replace(/[^\d]/g, '') : null;
+        const userJid = targetNumber ? `${targetNumber}@s.whatsapp.net` : null;
+
+        // Store connection info
+        const connectionInfo = {
+            sock,
+            connected: false,
+            timer: setTimeout(() => {
+                if (!connectionInfo.connected) {
+                    sock.end();
+                    connectionManager.delete(sessionId);
+                    res.status(408).json({ error: 'QR code expired. Please try again.' });
+                }
+            }, 60000) // 60 second timeout
+        };
+        connectionManager.set(sessionId, connectionInfo);
+
+        sock.ev.on('creds.update', saveCreds);
+
+        // Handle connection events
+        sock.ev.on('connection.update', async (update) => {
+            const { qr, connection, lastDisconnect } = update;
+            
+            if (qr) {
+                qrcode.toDataURL(qr, (err, url) => {
+                    if (!err) {
+                        res.json({ 
+                            sessionId,
+                            qrCode: url,
+                            message: 'QR code generated successfully. Scan within 60 seconds.'
+                        });
+                    }
+                });
+            }
+
+            if (connection === 'open') {
+                connectionInfo.connected = true;
+                clearTimeout(connectionInfo.timer);
+                
+                if (userJid) {
+                    try {
+                        const sessionString = Buffer.from(JSON.stringify(sock.authState.creds)).toString('base64');
+                        await sock.sendMessage(userJid, { 
+                            text: `✅ WhatsApp connection established!\n\nYour Session ID: ${sessionId}\n\nSession String:\n${sessionString}` 
+                        });
+                    } catch (sendError) {
+                        console.error('Failed to send confirmation:', sendError);
+                    }
+                }
+                
+                await delay(1000);
+                sock.end();
+                connectionManager.delete(sessionId);
+            } else if (connection === 'close') {
+                clearTimeout(connectionInfo.timer);
+                connectionManager.delete(sessionId);
+                
+                const { reason } = lastDisconnect || {};
+                if (reason === DisconnectReason.connectionLost) {
+                    res.status(500).json({ error: 'Connection lost. Please try again.' });
+                }
+            }
+        });
+    } catch (error) {
+        console.error('QR generation error:', error);
+        
+        // Clean up on error
+        if (connectionManager.has(sessionId)) {
+            const existing = connectionManager.get(sessionId);
+            existing.sock.end();
+            clearTimeout(existing.timer);
+            connectionManager.delete(sessionId);
+        }
+        
+        res.status(500).json({ error: error.message });
     }
 });
 
