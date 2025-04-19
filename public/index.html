@@ -1,88 +1,107 @@
+<!-- public/index.html -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-  <title>WhatsApp Pairing Code</title>
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      background: #111;
-      color: #fff;
-      padding: 40px;
-    }
-    input, button {
-      padding: 10px;
-      margin: 10px 0;
-      width: 100%;
-      max-width: 400px;
-    }
-    button {
-      background: #0f0;
-      border: none;
-      color: #000;
-      cursor: pointer;
-      font-weight: bold;
-    }
-    .response {
-      margin-top: 20px;
-      padding: 20px;
-      background: #222;
-      border: 1px solid #444;
-      max-width: 600px;
-    }
-  </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LEVI MD Pairing</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            text-align: center;
+        }
+        .container {
+            background: #f5f5f5;
+            border-radius: 10px;
+            padding: 20px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        input, button {
+            padding: 10px;
+            margin: 10px 0;
+            width: 100%;
+            box-sizing: border-box;
+        }
+        button {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+        button:hover {
+            background: #45a049;
+        }
+        #result {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 5px;
+            display: none;
+        }
+        .success {
+            background: #dff0d8;
+            color: #3c763d;
+        }
+        .error {
+            background: #f2dede;
+            color: #a94442;
+        }
+    </style>
 </head>
 <body>
-  <h1>Generate WhatsApp Pairing Code</h1>
+    <div class="container">
+        <h1>LEVI MD PAIRING</h1>
+        <p>Enter your WhatsApp number to get pairing code</p>
+        
+        <input type="text" id="number" placeholder="e.g. 919876543210" required>
+        <button id="pairBtn">GET PAIRING CODE</button>
+        
+        <div id="result"></div>
+    </div>
 
-  <form id="pairForm">
-    <input type="text" id="sessionId" placeholder="Enter Session ID" required />
-    <input type="text" id="phoneNumber" placeholder="Enter Phone Number" required />
-    <button type="submit">Get Pairing Code</button>
-  </form>
-
-  <div class="response" id="response" style="display: none;"></div>
-
-  <script>
-    const form = document.getElementById('pairForm');
-    const responseBox = document.getElementById('response');
-
-    form.addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const sessionId = document.getElementById('sessionId').value.trim();
-      const phoneNumber = document.getElementById('phoneNumber').value.trim();
-
-      responseBox.style.display = 'none';
-      responseBox.innerHTML = 'Generating pairing code...';
-
-      try {
-        const res = await fetch('/api/get-pairing-code', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sessionId, phoneNumber })
+    <script>
+        document.getElementById('pairBtn').addEventListener('click', async () => {
+            const number = document.getElementById('number').value.trim();
+            const resultDiv = document.getElementById('result');
+            
+            if (!number) {
+                resultDiv.className = 'error';
+                resultDiv.textContent = 'Please enter a phone number';
+                resultDiv.style.display = 'block';
+                return;
+            }
+            
+            try {
+                const response = await fetch('/pair', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ number })
+                });
+                
+                const data = await response.json();
+                
+                if (response.ok) {
+                    resultDiv.className = 'success';
+                    resultDiv.innerHTML = `
+                        <strong>Pairing Code:</strong> ${data.code}<br>
+                        <strong>Session ID:</strong> ${data.sessionId}<br><br>
+                        ${data.message}
+                    `;
+                } else {
+                    resultDiv.className = 'error';
+                    resultDiv.textContent = data.error || 'Pairing failed';
+                }
+                resultDiv.style.display = 'block';
+                
+            } catch (error) {
+                resultDiv.className = 'error';
+                resultDiv.textContent = 'Error connecting to server';
+                resultDiv.style.display = 'block';
+                console.error('Error:', error);
+            }
         });
-
-        const data = await res.json();
-        responseBox.style.display = 'block';
-
-        if (res.ok) {
-          responseBox.innerHTML = `
-            <strong>Pairing Code:</strong> <pre>${data.pairingCode}</pre><br/>
-            <strong>Message:</strong> ${data.message}<br/>
-            <strong>Session ID:</strong> ${data.sessionId}
-          `;
-        } else {
-          responseBox.innerHTML = `
-            <strong>Error:</strong> ${data.error}<br/>
-            <strong>Suggestion:</strong> ${data.suggestion || 'None'}
-          `;
-        }
-      } catch (err) {
-        responseBox.style.display = 'block';
-        responseBox.innerHTML = `<strong>Error:</strong> ${err.message}`;
-      }
-    });
-  </script>
+    </script>
 </body>
 </html>
