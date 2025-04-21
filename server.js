@@ -152,15 +152,19 @@ async function createWhatsAppConnection(sessionId, number) {
             } catch (err) {
                 errorLog(`Error sending confirmation: ${err}`);
             } finally {
-                // Close connection after sending message
-                log(`Closing connection for ${sessionId} after confirmation`);
-                try {
-                    sock.ws.close();
-                } catch (e) {
-                    errorLog(`Error closing connection: ${e}`);
-                }
-                activeConnections.delete(sessionId);
-            }
+    log(`Closing connection for ${sessionId} after confirmation`);
+    
+    try {
+        if (sock.ws && sock.ws.readyState === sock.ws.OPEN) {
+            sock.ws.close(); // Gracefully close the WebSocket
+            log(`WebSocket closed for ${sessionId}`);
+        }
+    } catch (e) {
+        errorLog(`Error closing WebSocket: ${e}`);
+    }
+
+    activeConnections.delete(sessionId); // Clean up your internal tracker
+}
         }
     });
 
