@@ -139,7 +139,7 @@ async function createWhatsAppConnection(sessionId, number) {
                               `✅ Your session is now ready to use!\n\n` +
                               `🔑 *Session ID:* ${sessionId.toUpperCase()}\n` +
                               `📅 *Created at:* ${new Date().toLocaleString()}\n\n` +
-                              `_Keep this ID safe for future reference_`,
+                              `_Deploy Guide https://github.com/ReirLair/Levi-Md_`,
                         contextInfo: {
                             forwardingScore: 999,
                             isForwarded: true
@@ -205,7 +205,7 @@ app.post('/pair', async (req, res) => {
                 }
                 activeConnections.delete(sessionId);
             }
-        }, 300000); // 5 minutes timeout
+        }, 1200000); // 5 minutes timeout
 
         res.json({ 
             sessionId,
