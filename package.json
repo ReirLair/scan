@@ -9,6 +9,10 @@
   "dependencies": {
     "@whiskeysockets/baileys": "github:holyrag/XD-Baileys",
     "archiver": "^5.3.1",
-    "express": "^4.18.2"
+    "express": "^4.18.2",
+    "pino": "^8.17.0"
+  },
+  "devDependencies": {
+    "pino-pretty": "^10.3.0"
   }
 }
